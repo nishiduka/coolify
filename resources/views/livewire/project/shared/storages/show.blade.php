@@ -1,13 +1,5 @@
 <div>
-    <x-modal yesOrNo modalId="{{ $modalId }}" modalTitle="Delete Storage">
-        <x-slot:modalBody>
-            <p>This storage will be deleted <span class="font-bold text-warning">({{ $storage->name }})</span>. It is
-                not
-                reversible. <br>Please think again.</p>
-        </x-slot:modalBody>
-    </x-modal>
-
-    <form wire:submit.prevent='submit' class="flex flex-col gap-2 xl:items-end xl:flex-row">
+    <form wire:submit='submit' class="flex flex-col gap-2 xl:items-end xl:flex-row">
         @if ($isReadOnly)
             @if ($isFirst)
                 <x-forms.input id="storage.name" label="Volume Name" required readonly />
@@ -32,9 +24,12 @@
                 <x-forms.button type="submit">
                     Update
                 </x-forms.button>
-                <x-forms.button isError isModal modalId="{{ $modalId }}">
-                    Delete
-                </x-forms.button>
+                <x-modal-confirmation isErrorButton buttonTitle="Delete">
+                    This storage will be deleted <span class="font-bold dark:text-warning">{{ $storage->name }}</span>. It
+                    is
+                    not
+                    reversible. <br>Please think again.
+                </x-modal-confirmation>
             </div>
         @endif
     </form>

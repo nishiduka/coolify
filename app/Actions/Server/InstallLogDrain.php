@@ -128,9 +128,9 @@ class InstallLogDrain
             if ($type !== 'custom') {
                 $parsers = base64_encode("
 [PARSER]
-Name        empty_line_skipper
-Format      regex
-Regex       /^(?!\s*$).+/
+    Name        empty_line_skipper
+    Format      regex
+    Regex       /^(?!\s*$).+/
 ");
             }
             $compose = base64_encode("
@@ -198,7 +198,7 @@ Files:
             }
             $restart_command = [
                 "echo 'Stopping old Fluent Bit'",
-                "cd $config_path && docker rm -f coolify-log-drain || true",
+                "cd $config_path && docker compose down --remove-orphans || true",
                 "echo 'Starting Fluent Bit'",
                 "cd $config_path && docker compose up -d --remove-orphans",
             ];

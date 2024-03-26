@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Actions\Application\StopApplication;
 use App\Actions\Database\StopDatabase;
+use App\Actions\Service\DeleteService;
 use App\Actions\Service\StopService;
 use App\Models\Application;
 use App\Models\Service;
@@ -18,6 +19,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Artisan;
 
 class DeleteResourceJob implements ShouldQueue, ShouldBeEncrypted
 {
@@ -30,38 +32,29 @@ class DeleteResourceJob implements ShouldQueue, ShouldBeEncrypted
     public function handle()
     {
         try {
-            $server = $this->resource->destination->server;
-            if (!$server->isFunctional()) {
-                $this->resource->delete();
-                return 'Server is not functional';
-            }
+            $this->resource->forceDelete();
             switch ($this->resource->type()) {
                 case 'application':
                     StopApplication::run($this->resource);
                     break;
                 case 'standalone-postgresql':
-                    StopDatabase::run($this->resource);
-                    break;
                 case 'standalone-redis':
-                    StopDatabase::run($this->resource);
-                    break;
                 case 'standalone-mongodb':
-                    StopDatabase::run($this->resource);
-                    break;
                 case 'standalone-mysql':
-                    StopDatabase::run($this->resource);
-                    break;
                 case 'standalone-mariadb':
                     StopDatabase::run($this->resource);
                     break;
                 case 'service':
                     StopService::run($this->resource);
+                    DeleteService::run($this->resource);
                     break;
             }
-            $this->resource->delete();
         } catch (\Throwable $e) {
+            ray($e->getMessage());
             send_internal_notification('ContainerStoppingJob failed with: ' . $e->getMessage());
             throw $e;
+        } finally {
+            Artisan::queue('cleanup:stucked-resources');
         }
     }
 }

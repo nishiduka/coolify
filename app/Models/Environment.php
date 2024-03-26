@@ -13,15 +13,19 @@ class Environment extends Model
         return $this->applications()->count() == 0 &&
             $this->redis()->count() == 0 &&
             $this->postgresqls()->count() == 0 &&
+            $this->mysqls()->count() == 0 &&
+            $this->mariadbs()->count() == 0 &&
             $this->mongodbs()->count() == 0 &&
             $this->services()->count() == 0;
     }
 
+    public function environment_variables() {
+        return $this->hasMany(SharedEnvironmentVariable::class);
+    }
     public function applications()
     {
         return $this->hasMany(Application::class);
     }
-
     public function postgresqls()
     {
         return $this->hasMany(StandalonePostgresql::class);

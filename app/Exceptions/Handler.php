@@ -47,7 +47,7 @@ class Handler extends ExceptionHandler
         if ($request->is('api/*') || $request->expectsJson() || $this->shouldReturnJson($request, $exception)) {
             return response()->json(['message' => $exception->getMessage()], 401);
         }
-        return  redirect()->guest($exception->redirectTo() ?? route('login'));
+        return redirect()->guest($exception->redirectTo() ?? route('login'));
     }
     /**
      * Register the exception handling callbacks for the application.
@@ -77,6 +77,9 @@ class Handler extends ExceptionHandler
                     );
                 }
             );
+            if (str($e->getMessage())->contains('No space left on device')) {
+                return;
+            }
             ray('reporting to sentry');
             Integration::captureUnhandledException($e);
         });

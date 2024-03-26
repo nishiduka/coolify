@@ -5,10 +5,11 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class StandaloneMongodb extends BaseModel
 {
-    use HasFactory;
+    use HasFactory, SoftDeletes;
     protected $guarded = [];
 
     protected static function booted()
@@ -42,7 +43,54 @@ class StandaloneMongodb extends BaseModel
             $database->scheduledBackups()->delete();
             $database->persistentStorages()->delete();
             $database->environment_variables()->delete();
+            $database->tags()->detach();
         });
+    }
+    public function realStatus()
+    {
+       return $this->getRawOriginal('status');
+    }
+    public function status(): Attribute
+    {
+        return Attribute::make(
+            set: function ($value) {
+                if (str($value)->contains('(')) {
+                    $status = str($value)->before('(')->trim()->value();
+                    $health = str($value)->after('(')->before(')')->trim()->value() ?? 'unhealthy';
+                } else if (str($value)->contains(':')) {
+                    $status = str($value)->before(':')->trim()->value();
+                    $health = str($value)->after(':')->trim()->value() ?? 'unhealthy';
+                } else {
+                    $status = $value;
+                    $health = 'unhealthy';
+                }
+                return "$status:$health";
+            },
+            get: function ($value) {
+                if (str($value)->contains('(')) {
+                    $status = str($value)->before('(')->trim()->value();
+                    $health = str($value)->after('(')->before(')')->trim()->value() ?? 'unhealthy';
+                } else if (str($value)->contains(':')) {
+                    $status = str($value)->before(':')->trim()->value();
+                    $health = str($value)->after(':')->trim()->value() ?? 'unhealthy';
+                } else {
+                    $status = $value;
+                    $health = 'unhealthy';
+                }
+                return "$status:$health";
+            },
+        );
+    }
+    public function tags()
+    {
+        return $this->morphToMany(Tag::class, 'taggable');
+    }
+    public function project() {
+        return data_get($this, 'environment.project');
+    }
+    public function team()
+    {
+        return data_get($this, 'environment.project.team');
     }
     public function isLogDrainEnabled()
     {
@@ -94,7 +142,7 @@ class StandaloneMongodb extends BaseModel
     {
         return 'standalone-mongodb';
     }
-    public function getDbUrl(bool $useInternal = false)
+    public function get_db_url(bool $useInternal = false)
     {
         if ($this->is_public && !$useInternal) {
             return "mongodb://{$this->mongo_initdb_root_username}:{$this->mongo_initdb_root_password}@{$this->destination->server->getIp}:{$this->public_port}/?directConnection=true";

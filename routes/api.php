@@ -1,124 +1,75 @@
 <?php
 
-use App\Actions\Database\StartMariadb;
-use App\Actions\Database\StartMongodb;
-use App\Actions\Database\StartMysql;
-use App\Actions\Database\StartPostgresql;
-use App\Actions\Database\StartRedis;
-use App\Actions\Service\StartService;
-use App\Models\User;
+use App\Http\Controllers\Api\Deploy;
+use App\Http\Controllers\Api\Domains;
+use App\Http\Controllers\Api\Resources;
+use App\Http\Controllers\Api\Server;
+use App\Http\Controllers\Api\Team;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Route;
-use Visus\Cuid2\Cuid2;
-
-/*
-|--------------------------------------------------------------------------
-| API Routes
-|--------------------------------------------------------------------------
-|
-| Here is where you can register API routes for your application. These
-| routes are loaded by the RouteServiceProvider and all of them will
-| be assigned to the "api" middleware group. Make something great!
-|
-*/
 
 Route::get('/health', function () {
     return 'OK';
 });
+Route::post('/feedback', function (Request $request) {
+    $content = $request->input('content');
+    $webhook_url = config('coolify.feedback_discord_webhook');
+    if ($webhook_url) {
+        Http::post($webhook_url, [
+            'content' => $content
+        ]);
+    }
+    return response()->json(['message' => 'Feedback sent.'], 200);
+});
+
 Route::group([
     'middleware' => ['auth:sanctum'],
     'prefix' => 'v1'
 ], function () {
-    Route::get('/deploy', function (Request $request) {
-        $token = auth()->user()->currentAccessToken();
-        $teamId = data_get($token, 'team_id');
-        $uuid = $request->query->get('uuid');
-        $force = $request->query->get('force') ?? false;
-        if (is_null($teamId)) {
-            return response()->json(['error' => 'Invalid token.'], 400);
-        }
-        if (!$uuid) {
-            return response()->json(['error' => 'No UUID provided.'], 400);
-        }
-        $resource = getResourceByUuid($uuid, $teamId);
-        if ($resource) {
-            $type = $resource->getMorphClass();
-            if ($type === 'App\Models\Application') {
-                queue_application_deployment(
-                    application_id: $resource->id,
-                    deployment_uuid: new Cuid2(7),
-                    force_rebuild: $force,
-                );
-                return response()->json(['message' => 'Deployment queued.'], 200);
-            } else if ($type === 'App\Models\StandalonePostgresql') {
-                if (str($resource->status)->startsWith('running')) {
-                    return response()->json(['message' => 'Database already running.'], 200);
-                }
-                StartPostgresql::run($resource);
-                $resource->update([
-                    'started_at' => now(),
-                ]);
-                return response()->json(['message' => 'Database started.'], 200);
-            } else if ($type === 'App\Models\StandaloneRedis') {
-                if (str($resource->status)->startsWith('running')) {
-                    return response()->json(['message' => 'Database already running.'], 200);
-                }
-                StartRedis::run($resource);
-                $resource->update([
-                    'started_at' => now(),
-                ]);
-                return response()->json(['message' => 'Database started.'], 200);
-            } else if ($type === 'App\Models\StandaloneMongodb') {
-                if (str($resource->status)->startsWith('running')) {
-                    return response()->json(['message' => 'Database already running.'], 200);
-                }
-                StartMongodb::run($resource);
-                $resource->update([
-                    'started_at' => now(),
-                ]);
-                return response()->json(['message' => 'Database started.'], 200);
-            } else if ($type === 'App\Models\StandaloneMysql') {
-                if (str($resource->status)->startsWith('running')) {
-                    return response()->json(['message' => 'Database already running.'], 200);
-                }
-                StartMysql::run($resource);
-                $resource->update([
-                    'started_at' => now(),
-                ]);
-                return response()->json(['message' => 'Database started.'], 200);
-            } else if ($type === 'App\Models\StandaloneMariadb') {
-                if (str($resource->status)->startsWith('running')) {
-                    return response()->json(['message' => 'Database already running.'], 200);
-                }
-                StartMariadb::run($resource);
-                $resource->update([
-                    'started_at' => now(),
-                ]);
-                return response()->json(['message' => 'Database started.'], 200);
-            } else if ($type === 'App\Models\Service') {
-                StartService::run($resource);
-                return response()->json(['message' => 'Service started. It could take a while, be patient.'], 200);
-            }
-        }
-        return response()->json(['error' => "No resource found with {$uuid}."], 404);
+    Route::get('/version', function () {
+        return response(config('version'));
     });
+    Route::get('/deploy', [Deploy::class, 'deploy']);
+    Route::get('/deployments', [Deploy::class, 'deployments']);
+
+    Route::get('/servers', [Server::class, 'servers']);
+    Route::get('/server/{uuid}', [Server::class, 'server_by_uuid']);
+
+    Route::get('/resources', [Resources::class, 'resources']);
+    Route::get('/domains', [Domains::class, 'domains']);
+
+    Route::get('/teams', [Team::class, 'teams']);
+    Route::get('/team/current', [Team::class, 'current_team']);
+    Route::get('/team/current/members', [Team::class, 'current_team_members']);
+    Route::get('/team/{id}', [Team::class, 'team_by_id']);
+    Route::get('/team/{id}/members', [Team::class, 'members_by_id']);
+
+
+    //Route::get('/projects', [Project::class, 'projects']);
+    //Route::get('/project/{uuid}', [Project::class, 'project_by_uuid']);
+    //Route::get('/project/{uuid}/{environment_name}', [Project::class, 'environment_details']);
 });
 
-Route::middleware(['throttle:5'])->group(function () {
-    Route::get('/unsubscribe/{token}', function () {
-        try {
-            $token = request()->token;
-            $email = decrypt($token);
-            if (!User::whereEmail($email)->exists()) {
-                return redirect('/');
-            }
-            if (User::whereEmail($email)->first()->marketing_emails === false) {
-                return 'You have already unsubscribed from marketing emails.';
-            }
-            User::whereEmail($email)->update(['marketing_emails' => false]);
-            return 'You have been unsubscribed from marketing emails.';
-        } catch (\Throwable $e) {
-            return 'Something went wrong. Please try again or contact support.';
-        }
-    })->name('unsubscribe.marketing.emails');
-});
+Route::get('/{any}', function () {
+    return response()->json(['error' => 'Not found.'], 404);
+})->where('any', '.*');
+
+// Route::middleware(['throttle:5'])->group(function () {
+//     Route::get('/unsubscribe/{token}', function () {
+//         try {
+//             $token = request()->token;
+//             $email = decrypt($token);
+//             if (!User::whereEmail($email)->exists()) {
+//                 return redirect(RouteServiceProvider::HOME);
+//             }
+//             if (User::whereEmail($email)->first()->marketing_emails === false) {
+//                 return 'You have already unsubscribed from marketing emails.';
+//             }
+//             User::whereEmail($email)->update(['marketing_emails' => false]);
+//             return 'You have been unsubscribed from marketing emails.';
+//         } catch (\Throwable $e) {
+//             return 'Something went wrong. Please try again or contact support.';
+//         }
+//     })->name('unsubscribe.marketing.emails');
+// });

@@ -1,9 +1,4 @@
 <div>
-    <x-modal yesOrNo modalId="deleteDestination" modalTitle="Delete Destination">
-        <x-slot:modalBody>
-            <p>This destination will be deleted. It is not reversible. <br>Please think again.</p>
-        </x-slot:modalBody>
-    </x-modal>
     <form class="flex flex-col">
         <div class="flex items-center gap-2">
             <h1>Destination</h1>
@@ -11,14 +6,14 @@
                 Save
             </x-forms.button>
             @if ($destination->network !== 'coolify')
-                <x-forms.button isError isModal modalId="deleteDestination">
-                    Delete
-                </x-forms.button>
+                <x-modal-confirmation isErrorButton buttonTitle="Delete Destination">
+                    This destination will be deleted. It is not reversible. <br>Please think again.
+                </x-modal-confirmation>
             @endif
         </div>
 
         @if ($destination->getMorphClass() === 'App\Models\StandaloneDocker')
-            <div class="subtitle ">A Docker network in a non-swarm environment</div>
+            <div class="subtitle ">A Docker network in a non-swarm environment.</div>
         @else
             <div class="subtitle ">Your swarm docker network. WIP</div>
         @endif

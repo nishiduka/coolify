@@ -1,12 +1,23 @@
 #!/bin/bash
 ## Do not modify this file. You will lose the ability to install and auto-update!
 
-VERSION="1.1.0"
+set -e # Exit immediately if a command exits with a non-zero status
+## $1 could be empty, so we need to disable this check
+#set -u # Treat unset variables as an error and exit
+set -o pipefail # Cause a pipeline to return the status of the last command that exited with a non-zero status
+
+VERSION="1.2.3"
 DOCKER_VERSION="24.0"
 
 CDN="https://cdn.coollabs.io/coolify"
-OS_TYPE=$(cat /etc/os-release | grep -w "ID" | cut -d "=" -f 2 | tr -d '"')
-OS_VERSION=$(cat /etc/os-release | grep -w "VERSION_ID" | cut -d "=" -f 2 | tr -d '"')
+OS_TYPE=$(grep -w "ID" /etc/os-release | cut -d "=" -f 2 | tr -d '"')
+
+if [ "$OS_TYPE" = "arch" ]; then
+    OS_VERSION="rolling"
+else
+    OS_VERSION=$(grep -w "VERSION_ID" /etc/os-release | cut -d "=" -f 2 | tr -d '"')
+fi
+
 LATEST_VERSION=$(curl --silent $CDN/versions.json | grep -i version | sed -n '2p' | xargs | awk '{print $2}' | tr -d ',')
 DATE=$(date +"%Y%m%d-%H%M%S")
 
@@ -16,16 +27,18 @@ if [ $EUID != 0 ]; then
 fi
 
 case "$OS_TYPE" in
-ubuntu | debian | raspbian | centos | fedora | rhel | ol | rocky | sles | opensuse-leap | opensuse-tumbleweed) ;;
+arch | ubuntu | debian | raspbian | centos | fedora | rhel | ol | rocky | sles | opensuse-leap | opensuse-tumbleweed | almalinux) ;;
 *)
-    echo "This script only supports Debian, Redhat or Sles based operating systems for now."
+    echo "This script only supports Debian, Redhat, Arch Linux, or SLES based operating systems for now."
     exit
     ;;
 esac
 
-# Ovewrite LATEST_VERSION if user pass a version number
+# Overwrite LATEST_VERSION if user pass a version number
 if [ "$1" != "" ]; then
     LATEST_VERSION=$1
+    LATEST_VERSION="${LATEST_VERSION,,}"
+    LATEST_VERSION="${LATEST_VERSION#v}"
 fi
 
 echo -e "-------------"
@@ -41,11 +54,17 @@ echo -e "-------------"
 echo "Installing required packages..."
 
 case "$OS_TYPE" in
+arch)
+    pacman -Sy >/dev/null 2>&1 || true
+    if ! pacman -Q curl wget git jq >/dev/null 2>&1; then
+        pacman -S --noconfirm curl wget git jq >/dev/null 2>&1 || true
+    fi
+    ;;
 ubuntu | debian | raspbian)
     apt update -y >/dev/null 2>&1
     apt install -y curl wget git jq >/dev/null 2>&1
     ;;
-centos | fedora | rhel | ol | rocky)
+centos | fedora | rhel | ol | rocky | almalinux)
     dnf install -y curl wget git jq >/dev/null 2>&1
     ;;
 sles | opensuse-leap | opensuse-tumbleweed)
@@ -53,34 +72,117 @@ sles | opensuse-leap | opensuse-tumbleweed)
     zypper install -y curl wget git jq >/dev/null 2>&1
     ;;
 *)
-    echo "This script only supports Debian, Redhat or Sles based operating systems for now."
+    echo "This script only supports Debian, Redhat, Arch Linux, or SLES based operating systems for now."
     exit
     ;;
 esac
 
-if ! [ -x "$(command -v docker)" ]; then
-    echo "Docker is not installed. Installing Docker."
-    curl https://releases.rancher.com/install-docker/${DOCKER_VERSION}.sh | sh
-    if [ -x "$(command -v docker)" ]; then
-        echo "Docker installed successfully."
-    else
-        echo "Docker installation failed with Rancher script. Trying with official script."
-        curl https://get.docker.com | sh -s -- --version ${DOCKER_VERSION}
-        if [ -x "$(command -v docker)" ]; then
-            echo "Docker installed successfully."
-        else
-            echo "Docker installation failed with official script."
-            echo "Maybe your OS is not supported."
-            echo "Please visit https://docs.docker.com/engine/install/ and install Docker manually to continue."
-            exit 1
-        fi
+# Detect OpenSSH server
+SSH_DETECTED=false
+if [ -x "$(command -v systemctl)" ]; then
+    if systemctl status sshd >/dev/null 2>&1; then
+        echo "OpenSSH server is installed."
+        SSH_DETECTED=true
+    fi
+    if systemctl status ssh >/dev/null 2>&1; then
+        echo "OpenSSH server is installed."
+        SSH_DETECTED=true
+    fi
+elif [ -x "$(command -v service)" ]; then
+    if service sshd status >/dev/null 2>&1; then
+        echo "OpenSSH server is installed."
+        SSH_DETECTED=true
+    fi
+    if service ssh status >/dev/null 2>&1; then
+        echo "OpenSSH server is installed."
+        SSH_DETECTED=true
     fi
 fi
+if [ "$SSH_DETECTED" = "false" ]; then
+    echo "###############################################################################"
+    echo "WARNING: Could not detect if OpenSSH server is installed and running - this does not mean that it is not installed, just that we could not detect it."
+    echo -e "Please make sure it is set, otherwise Coolify cannot connect to the host system. \n"
+    echo "###############################################################################"
+fi
+
+# Detect SSH PermitRootLogin
+SSH_PERMIT_ROOT_LOGIN=false
+SSH_PERMIT_ROOT_LOGIN_CONFIG=$(grep "^PermitRootLogin" /etc/ssh/sshd_config | awk '{print $2}') || SSH_PERMIT_ROOT_LOGIN_CONFIG="N/A (commented out or not found at all)"
+if [ "$SSH_PERMIT_ROOT_LOGIN_CONFIG" = "prohibit-password" ] || [ "$SSH_PERMIT_ROOT_LOGIN_CONFIG" = "yes" ] || [ "$SSH_PERMIT_ROOT_LOGIN_CONFIG" = "without-password" ]; then
+    echo "PermitRootLogin is enabled."
+    SSH_PERMIT_ROOT_LOGIN=true
+fi
+
+if [ "$SSH_PERMIT_ROOT_LOGIN" != "true" ]; then
+    echo "###############################################################################"
+    echo "WARNING: PermitRootLogin is not enabled in /etc/ssh/sshd_config."
+    echo -e "It is set to $SSH_PERMIT_ROOT_LOGIN_CONFIG. Should be prohibit-password, yes or without-password.\n"
+    echo -e "Please make sure it is set, otherwise Coolify cannot connect to the host system. \n"
+    echo "(Currently we only support root user to login via SSH, this will be changed in the future.)"
+    echo "###############################################################################"
+fi
+
+# Detect if docker is installed via snap
+if [ -x "$(command -v snap)" ]; then
+    if snap list | grep -q docker; then
+        echo "Docker is installed via snap."
+        echo "Please note that Coolify does not support Docker installed via snap."
+        echo "Please remove Docker with snap (snap remove docker) and reexecute this script."
+        exit 1
+    fi
+fi
+
+if ! [ -x "$(command -v docker)" ]; then
+    if [ "$OS_TYPE" == 'almalinux' ]; then
+        dnf config-manager --add-repo=https://download.docker.com/linux/centos/docker-ce.repo
+        dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        if ! [ -x "$(command -v docker)" ]; then
+            echo "Docker could not be installed automatically. Please visit https://docs.docker.com/engine/install/ and install Docker manually to continue."
+            exit 1
+        fi
+        systemctl start docker
+        systemctl enable docker
+    else
+        set +e
+        if ! [ -x "$(command -v docker)" ]; then
+            echo "Docker is not installed. Installing Docker."
+            if [ "$OS_TYPE" = "arch" ]; then
+                pacman -Sy docker docker-compose --noconfirm
+                systemctl enable docker.service
+                if [ -x "$(command -v docker)" ]; then
+                    echo "Docker installed successfully."
+                else
+                    echo "Failed to install Docker with pacman. Try to install it manually."
+                    echo "Please visit https://wiki.archlinux.org/title/docker for more information."
+                    exit
+                fi
+            else
+                curl https://releases.rancher.com/install-docker/${DOCKER_VERSION}.sh | sh
+                if [ -x "$(command -v docker)" ]; then
+                    echo "Docker installed successfully."
+                else
+                    echo "Docker installation failed with Rancher script. Trying with official script."
+                    curl https://get.docker.com | sh -s -- --version ${DOCKER_VERSION}
+                    if [ -x "$(command -v docker)" ]; then
+                        echo "Docker installed successfully."
+                    else
+                        echo "Docker installation failed with official script."
+                        echo "Maybe your OS is not supported?"
+                        echo "Please visit https://docs.docker.com/engine/install/ and install Docker manually to continue."
+                        exit 1
+                    fi
+                fi
+            fi
+        fi
+        set -e
+    fi
+fi
+
 echo -e "-------------"
 echo -e "Check Docker Configuration..."
 mkdir -p /etc/docker
-
-test -s /etc/docker/daemon.json && cp /etc/docker/daemon.json /etc/docker/daemon.json.original-$DATE || cat >/etc/docker/daemon.json <<EOL
+# shellcheck disable=SC2015
+test -s /etc/docker/daemon.json && cp /etc/docker/daemon.json /etc/docker/daemon.json.original-"$DATE" || cat >/etc/docker/daemon.json <<EOL
 {
   "log-driver": "json-file",
   "log-opts": {
@@ -98,11 +200,15 @@ cat >/etc/docker/daemon.json.coolify <<EOL
   }
 }
 EOL
-cat <<<$(jq . /etc/docker/daemon.json.coolify) >/etc/docker/daemon.json.coolify
-cat <<<$(jq -s '.[0] * .[1]' /etc/docker/daemon.json /etc/docker/daemon.json.coolify) >/etc/docker/daemon.json
+TEMP_FILE=$(mktemp)
+if ! jq -s '.[0] * .[1]' /etc/docker/daemon.json /etc/docker/daemon.json.coolify >"$TEMP_FILE"; then
+    echo "Error merging JSON files"
+    exit 1
+fi
+mv "$TEMP_FILE" /etc/docker/daemon.json
 
-if [ -s /etc/docker/daemon.json.original-$DATE ]; then
-    DIFF=$(diff <(jq --sort-keys . /etc/docker/daemon.json) <(jq --sort-keys . /etc/docker/daemon.json.original-$DATE))
+if [ -s /etc/docker/daemon.json.original-"$DATE" ]; then
+    DIFF=$(diff <(jq --sort-keys . /etc/docker/daemon.json) <(jq --sort-keys . /etc/docker/daemon.json.original-"$DATE"))
     if [ "$DIFF" != "" ]; then
         echo "Docker configuration updated, restart docker daemon..."
         systemctl restart docker
@@ -116,9 +222,8 @@ fi
 
 echo -e "-------------"
 
-mkdir -p /data/coolify/ssh/keys
-mkdir -p /data/coolify/ssh/mux
-mkdir -p /data/coolify/source
+mkdir -p /data/coolify/{source,ssh,applications,databases,backups,services,proxy,webhooks-during-maintenance}
+mkdir -p /data/coolify/ssh/{keys,mux}
 mkdir -p /data/coolify/proxy/dynamic
 
 chown -R 9999:root /data/coolify
@@ -137,10 +242,21 @@ if [ ! -f /data/coolify/source/.env ]; then
     sed -i "s|APP_KEY=.*|APP_KEY=base64:$(openssl rand -base64 32)|g" /data/coolify/source/.env
     sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=$(openssl rand -base64 32)|g" /data/coolify/source/.env
     sed -i "s|REDIS_PASSWORD=.*|REDIS_PASSWORD=$(openssl rand -base64 32)|g" /data/coolify/source/.env
+    sed -i "s|PUSHER_APP_ID=.*|PUSHER_APP_ID=$(openssl rand -hex 32)|g" /data/coolify/source/.env
+    sed -i "s|PUSHER_APP_KEY=.*|PUSHER_APP_KEY=$(openssl rand -hex 32)|g" /data/coolify/source/.env
+    sed -i "s|PUSHER_APP_SECRET=.*|PUSHER_APP_SECRET=$(openssl rand -hex 32)|g" /data/coolify/source/.env
 fi
 
 # Merge .env and .env.production. New values will be added to .env
 sort -u -t '=' -k 1,1 /data/coolify/source/.env /data/coolify/source/.env.production | sed '/^$/d' >/data/coolify/source/.env.temp && mv /data/coolify/source/.env.temp /data/coolify/source/.env
+
+if [ "$AUTOUPDATE" = "false" ]; then
+    if ! grep -q "AUTOUPDATE=" /data/coolify/source/.env; then
+        echo "AUTOUPDATE=false" >>/data/coolify/source/.env
+    else
+        sed -i "s|AUTOUPDATE=.*|AUTOUPDATE=false|g" /data/coolify/source/.env
+    fi
+fi
 
 # Generate an ssh key (ed25519) at /data/coolify/ssh/keys/id.root@host.docker.internal
 if [ ! -f /data/coolify/ssh/keys/id.root@host.docker.internal ]; then
@@ -160,11 +276,11 @@ if [ ! -f ~/.ssh/authorized_keys ]; then
     addSshKey
 fi
 
-if [ -z "$(grep -w "root@coolify" ~/.ssh/authorized_keys)" ]; then
+if ! grep -qw "root@coolify" ~/.ssh/authorized_keys; then
     addSshKey
 fi
 
-bash /data/coolify/source/upgrade.sh ${LATEST_VERSION:-latest}
+bash /data/coolify/source/upgrade.sh "${LATEST_VERSION:-latest}"
 
 echo -e "\nCongratulations! Your Coolify instance is ready to use.\n"
 echo "Please visit http://$(curl -4s https://ifconfig.io):8000 to get started."

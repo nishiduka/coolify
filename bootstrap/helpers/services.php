@@ -4,8 +4,8 @@ use App\Models\EnvironmentVariable;
 use App\Models\Service;
 use App\Models\ServiceApplication;
 use App\Models\ServiceDatabase;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Spatie\Url\Url;
 use Symfony\Component\Yaml\Yaml;
 
 function replaceRegex(?string $name = null)
@@ -21,49 +21,6 @@ function replaceVariables($variable)
     return $variable->replaceFirst('$', '')->replaceFirst('{', '')->replaceLast('}', '');
 }
 
-function serviceStatus(Service $service)
-{
-    $foundRunning = false;
-    $isDegraded = false;
-    $foundRestaring = false;
-    $applications = $service->applications;
-    $databases = $service->databases;
-    foreach ($applications as $application) {
-        if ($application->exclude_from_status) {
-            continue;
-        }
-        if (Str::of($application->status)->startsWith('running')) {
-            $foundRunning = true;
-        } else if (Str::of($application->status)->startsWith('restarting')) {
-            $foundRestaring = true;
-        } else {
-            $isDegraded = true;
-        }
-    }
-    foreach ($databases as $database) {
-        if ($database->exclude_from_status) {
-            continue;
-        }
-        if (Str::of($database->status)->startsWith('running')) {
-            $foundRunning = true;
-        } else if (Str::of($database->status)->startsWith('restarting')) {
-            $foundRestaring = true;
-        } else {
-            $isDegraded = true;
-        }
-    }
-    if ($foundRestaring) {
-        return 'degraded';
-    }
-    if ($foundRunning && !$isDegraded) {
-        return 'running';
-    } else if ($foundRunning && $isDegraded) {
-        return 'degraded';
-    } else if (!$foundRunning && !$isDegraded) {
-        return 'exited';
-    }
-    return 'exited';
-}
 function getFilesystemVolumesFromServer(ServiceApplication|ServiceDatabase $oneService, bool $isInit = false)
 {
     // TODO: make this async
@@ -123,7 +80,7 @@ function getFilesystemVolumesFromServer(ServiceApplication|ServiceDatabase $oneS
         return handleError($e);
     }
 }
-function updateCompose($resource)
+function updateCompose(ServiceApplication|ServiceDatabase $resource)
 {
     try {
         $name = data_get($resource, 'name');
@@ -133,17 +90,24 @@ function updateCompose($resource)
         // Switch Image
         $image = data_get($resource, 'image');
         data_set($dockerCompose, "services.{$name}.image", $image);
+        $dockerComposeRaw = Yaml::dump($dockerCompose, 10, 2);
+        $resource->service->docker_compose_raw = $dockerComposeRaw;
+        $resource->service->save();
 
-        if (!str($resource->fqdn)->contains(',')) {
+        if ($resource->fqdn && !str($resource->fqdn)->contains(',')) {
             // Update FQDN
             $variableName = "SERVICE_FQDN_" . Str::of($resource->name)->upper();
             $generatedEnv = EnvironmentVariable::where('service_id', $resource->service_id)->where('key', $variableName)->first();
+            $fqdn = Url::fromString($resource->fqdn);
+            $fqdn = $fqdn->getScheme() . '://' . $fqdn->getHost();
             if ($generatedEnv) {
-                $generatedEnv->value = $resource->fqdn;
+                $generatedEnv->value = $fqdn;
                 $generatedEnv->save();
             }
             $variableName = "SERVICE_URL_" . Str::of($resource->name)->upper();
             $generatedEnv = EnvironmentVariable::where('service_id', $resource->service_id)->where('key', $variableName)->first();
+            $url = Url::fromString($resource->fqdn);
+            $url = $url->getHost();
             if ($generatedEnv) {
                 $url = Str::of($resource->fqdn)->after('://');
                 $generatedEnv->value = $url;
@@ -151,9 +115,6 @@ function updateCompose($resource)
             }
         }
 
-        $dockerComposeRaw = Yaml::dump($dockerCompose, 10, 2);
-        $resource->service->docker_compose_raw = $dockerComposeRaw;
-        $resource->service->save();
     } catch (\Throwable $e) {
         return handleError($e);
     }

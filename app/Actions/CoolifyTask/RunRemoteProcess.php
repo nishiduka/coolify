@@ -17,9 +17,11 @@ class RunRemoteProcess
 
     public bool $hide_from_output;
 
-    public bool $is_finished;
-
     public bool $ignore_errors;
+
+    public $call_event_on_finish = null;
+
+    public $call_event_data = null;
 
     protected $time_start;
 
@@ -27,14 +29,14 @@ class RunRemoteProcess
 
     protected $last_write_at = 0;
 
-    protected $throttle_interval_ms = 500;
+    protected $throttle_interval_ms = 200;
 
     protected int $counter = 1;
 
     /**
      * Create a new job instance.
      */
-    public function __construct(Activity $activity, bool $hide_from_output = false, bool $is_finished = false, bool $ignore_errors = false)
+    public function __construct(Activity $activity, bool $hide_from_output = false, bool $ignore_errors = false, $call_event_on_finish = null, $call_event_data = null)
     {
 
         if ($activity->getExtraProperty('type') !== ActivityTypes::INLINE->value) {
@@ -43,8 +45,9 @@ class RunRemoteProcess
 
         $this->activity = $activity;
         $this->hide_from_output = $hide_from_output;
-        $this->is_finished = $is_finished;
         $this->ignore_errors = $ignore_errors;
+        $this->call_event_on_finish = $call_event_on_finish;
+        $this->call_event_data = $call_event_data;
     }
 
     public static function decodeOutput(?Activity $activity = null): string
@@ -74,17 +77,29 @@ class RunRemoteProcess
         $this->time_start = hrtime(true);
 
         $status = ProcessStatus::IN_PROGRESS;
-        $processResult = Process::forever()->run($this->getCommand(), $this->handleOutput(...));
+        $timeout = config('constants.ssh.command_timeout');
+        $process = Process::timeout($timeout)->start($this->getCommand(), $this->handleOutput(...));
+        $this->activity->properties = $this->activity->properties->merge([
+            'process_id' => $process->id(),
+        ]);
 
+        $processResult = $process->wait();
+        // $processResult = Process::timeout($timeout)->run($this->getCommand(), $this->handleOutput(...));
         if ($this->activity->properties->get('status') === ProcessStatus::ERROR->value) {
             $status = ProcessStatus::ERROR;
         } else {
-            if (($processResult->exitCode() == 0 && $this->is_finished) || $this->activity->properties->get('status') === ProcessStatus::FINISHED->value) {
+            if ($processResult->exitCode() == 0) {
                 $status = ProcessStatus::FINISHED;
             }
             if ($processResult->exitCode() != 0 && !$this->ignore_errors) {
                 $status = ProcessStatus::ERROR;
             }
+            // if (($processResult->exitCode() == 0 && $this->is_finished) || $this->activity->properties->get('status') === ProcessStatus::FINISHED->value) {
+            //     $status = ProcessStatus::FINISHED;
+            // }
+            // if ($processResult->exitCode() != 0 && !$this->ignore_errors) {
+            //     $status = ProcessStatus::ERROR;
+            // }
         }
 
         $this->activity->properties = $this->activity->properties->merge([
@@ -97,7 +112,21 @@ class RunRemoteProcess
         if ($processResult->exitCode() != 0 && !$this->ignore_errors) {
             throw new \RuntimeException($processResult->errorOutput(), $processResult->exitCode());
         }
-
+        if ($this->call_event_on_finish) {
+            try {
+                if ($this->call_event_data) {
+                    event(resolve("App\\Events\\$this->call_event_on_finish", [
+                        "data" => $this->call_event_data,
+                    ]));
+                } else {
+                    event(resolve("App\\Events\\$this->call_event_on_finish", [
+                        'userId' => $this->activity->causer_id,
+                    ]));
+                }
+            } catch (\Throwable $e) {
+                ray($e);
+            }
+        }
         return $processResult;
     }
 
@@ -117,7 +146,6 @@ class RunRemoteProcess
         }
         $this->current_time = $this->elapsedTime();
         $this->activity->description = $this->encodeOutput($type, $output);
-
         if ($this->isAfterLastThrottle()) {
             // Let's write to database.
             DB::transaction(function () {

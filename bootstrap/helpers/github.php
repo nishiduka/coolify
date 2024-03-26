@@ -29,7 +29,7 @@ function generate_github_installation_token(GithubApp $source)
         'Accept' => 'application/vnd.github.machine-man-preview+json'
     ])->post("{$source->api_url}/app/installations/{$source->installation_id}/access_tokens");
     if ($token->failed()) {
-        throw new \Exception("Failed to get access token for " . $source->name . " with error: " . $token->json()['message']);
+        throw new RuntimeException("Failed to get access token for " . $source->name . " with error: " . $token->json()['message']);
     }
     return $token->json()['token'];
 }
@@ -69,6 +69,7 @@ function githubApi(GithubApp|GitlabApp|null $source, string $endpoint, string $m
     }
     $json = $response->json();
     if ($response->failed() && $throwError) {
+        ray($json);
         throw new \Exception("Failed to get data from {$source->name} with error:<br><br>" . $json['message'] . "<br><br>Rate Limit resets at: " . Carbon::parse((int)$response->header('X-RateLimit-Reset'))->format('Y-m-d H:i:s') . 'UTC');
     }
     return [
@@ -84,4 +85,9 @@ function get_installation_path(GithubApp $source)
     $name = Str::of(Str::kebab($github->name));
     $installation_path = $github->html_url === 'https://github.com' ? 'apps' : 'github-apps';
     return "$github->html_url/$installation_path/$name/installations/new";
+}
+function get_permissions_path(GithubApp $source) {
+    $github = GithubApp::where('uuid', $source->uuid)->first();
+    $name = Str::of(Str::kebab($github->name));
+    return "$github->html_url/settings/apps/$name/permissions";
 }

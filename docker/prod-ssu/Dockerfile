@@ -1,21 +1,21 @@
-FROM serversideup/php:8.2-fpm-nginx as base
+FROM serversideup/php:8.2-fpm-nginx-v2.2.1 as base
 WORKDIR /var/www/html
 
 COPY composer.json composer.lock ./
 RUN composer install --no-dev --no-interaction --no-plugins --no-scripts --prefer-dist
 
-FROM node:19 as static-assets
+FROM node:20 as static-assets
 WORKDIR /app
 COPY . .
 COPY --from=base --chown=9999:9999 /var/www/html .
 RUN npm install
 RUN npm run build
 
-FROM serversideup/php:8.2-fpm-nginx
+FROM serversideup/php:8.2-fpm-nginx-v2.2.1
 
 ARG TARGETPLATFORM
 # https://github.com/cloudflare/cloudflared/releases
-ARG CLOUDFLARED_VERSION=2023.8.2
+ARG CLOUDFLARED_VERSION=2024.2.1
 ARG POSTGRES_VERSION=15
 
 WORKDIR /var/www/html
@@ -31,7 +31,7 @@ RUN apt-get update
 RUN apt-get install postgresql-client-$POSTGRES_VERSION -y
 
 # Coolify requirements
-RUN apt-get install -y php-pgsql openssh-client git git-lfs jq lsof
+RUN apt-get install -y php8.2-pgsql openssh-client git git-lfs jq lsof
 RUN apt-get -y autoremove && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /usr/share/doc/*
 
 COPY docker/prod-ssu/nginx.conf /etc/nginx/conf.d/custom.conf
@@ -62,3 +62,8 @@ RUN /bin/bash -c "if [[ ${TARGETPLATFORM} == 'linux/arm64' ]]; then \
     echo 'arm64' && \
     curl -L https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-arm64 -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared \
     ;fi"
+
+RUN { \
+    echo 'upload_max_filesize=256M'; \
+    echo 'post_max_size=256M'; \
+  } > /etc/php/current_version/cli/conf.d/upload-limits.ini

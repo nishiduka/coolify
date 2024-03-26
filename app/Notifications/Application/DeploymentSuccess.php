@@ -38,12 +38,18 @@ class DeploymentSuccess extends Notification implements ShouldQueue
         if (Str::of($this->fqdn)->explode(',')->count() > 1) {
             $this->fqdn = Str::of($this->fqdn)->explode(',')->first();
         }
-        $this->deployment_url = base_url() . "/project/{$this->project_uuid}/{$this->environment_name}/application/{$this->application->uuid}/deployment/{$this->deployment_uuid}";
+        $this->deployment_url = base_url() . "/project/{$this->project_uuid}/" . urlencode($this->environment_name) . "/application/{$this->application->uuid}/deployment/{$this->deployment_uuid}";
     }
 
     public function via(object $notifiable): array
     {
-        return setNotificationChannels($notifiable, 'deployments');
+        $channels = setNotificationChannels($notifiable, 'deployments');
+        if (isCloud()) {
+            $channels = array_filter($channels, function ($channel) {
+                return $channel !== 'App\Notifications\Channels\EmailChannel';
+            });
+        }
+        return $channels;
     }
 
     public function toMail(): MailMessage
@@ -69,7 +75,7 @@ class DeploymentSuccess extends Notification implements ShouldQueue
     public function toDiscord(): string
     {
         if ($this->preview) {
-            $message = 'Coolify:  New PR' . $this->preview->pull_request_id . ' version successfully deployed of ' . $this->application_name . '
+            $message = 'Coolify: New PR' . $this->preview->pull_request_id . ' version successfully deployed of ' . $this->application_name . '
 
 ';
             if ($this->preview->fqdn) {

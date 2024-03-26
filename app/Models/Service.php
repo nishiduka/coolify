@@ -4,46 +4,96 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Collection;
-use Symfony\Component\Yaml\Yaml;
-use Illuminate\Support\Str;
 
 class Service extends BaseModel
 {
-    use HasFactory;
+    use HasFactory, SoftDeletes;
     protected $guarded = [];
-
-    protected static function booted()
-    {
-        static::deleting(function ($service) {
-            $storagesToDelete = collect([]);
-            foreach ($service->applications()->get() as $application) {
-                $storages = $application->persistentStorages()->get();
-                foreach ($storages as $storage) {
-                    $storagesToDelete->push($storage);
-                }
-            }
-            foreach ($service->databases()->get() as $database) {
-                $storages = $database->persistentStorages()->get();
-                foreach ($storages as $storage) {
-                    $storagesToDelete->push($storage);
-                }
-            }
-            $service->environment_variables()->delete();
-            $service->applications()->delete();
-            $service->databases()->delete();
-
-            $server = data_get($service, 'server');
-            if ($server && $storagesToDelete->count() > 0) {
-                $storagesToDelete->each(function ($storage) use ($server) {
-                    instant_remote_process(["docker volume rm -f $storage->name"], $server, false);
-                });
-            }
-        });
-    }
     public function type()
     {
         return 'service';
+    }
+    public function project()
+    {
+        return data_get($this, 'environment.project');
+    }
+    public function team()
+    {
+        return data_get($this, 'environment.project.team');
+    }
+    public function tags()
+    {
+        return $this->morphToMany(Tag::class, 'taggable');
+    }
+    public function status()
+    {
+        $applications = $this->applications;
+        $databases = $this->databases;
+
+        $complexStatus = null;
+        $complexHealth = null;
+
+        foreach ($applications as $application) {
+            if ($application->exclude_from_status) {
+                continue;
+            }
+            $status = str($application->status)->before('(')->trim();
+            $health = str($application->status)->between('(', ')')->trim();
+            if ($complexStatus === 'degraded') {
+                continue;
+            }
+            if ($status->startsWith('running')) {
+                if ($complexStatus === 'exited') {
+                    $complexStatus = 'degraded';
+                } else {
+                    $complexStatus = 'running';
+                }
+            } else if ($status->startsWith('restarting')) {
+                $complexStatus = 'degraded';
+            } else if ($status->startsWith('exited')) {
+                $complexStatus = 'exited';
+            }
+            if ($health->value() === 'healthy') {
+                if ($complexHealth === 'unhealthy') {
+                    continue;
+                }
+                $complexHealth = 'healthy';
+            } else {
+                $complexHealth = 'unhealthy';
+            }
+        }
+        foreach ($databases as $database) {
+            if ($database->exclude_from_status) {
+                continue;
+            }
+            $status = str($database->status)->before('(')->trim();
+            $health = str($database->status)->between('(', ')')->trim();
+            if ($complexStatus === 'degraded') {
+                continue;
+            }
+            if ($status->startsWith('running')) {
+                if ($complexStatus === 'exited') {
+                    $complexStatus = 'degraded';
+                } else {
+                    $complexStatus = 'running';
+                }
+            } else if ($status->startsWith('restarting')) {
+                $complexStatus = 'degraded';
+            } else if ($status->startsWith('exited')) {
+                $complexStatus = 'exited';
+            }
+            if ($health->value() === 'healthy') {
+                if ($complexHealth === 'unhealthy') {
+                    continue;
+                }
+                $complexHealth = 'healthy';
+            } else {
+                $complexHealth = 'unhealthy';
+            }
+        }
+        return "{$complexStatus}:{$complexHealth}";
     }
     public function extraFields()
     {
@@ -52,6 +102,79 @@ class Service extends BaseModel
         foreach ($applications as $application) {
             $image = str($application->image)->before(':')->value();
             switch ($image) {
+                case str($image)?->contains('grafana'):
+                    $data = collect([]);
+                    $admin_password = $this->environment_variables()->where('key', 'SERVICE_PASSWORD_GRAFANA')->first();
+                    $data = $data->merge([
+                        'Admin User' => [
+                            'key' => 'GF_SECURITY_ADMIN_USER',
+                            'value' => 'admin',
+                            'readonly' => true,
+                            'rules' => 'required',
+                        ],
+                    ]);
+                    if ($admin_password) {
+                        $data = $data->merge([
+                            'Admin Password' => [
+                                'key' => 'GF_SECURITY_ADMIN_PASSWORD',
+                                'value' => data_get($admin_password, 'value'),
+                                'rules' => 'required',
+                                'isPassword' => true,
+                            ],
+                        ]);
+                    }
+                    $fields->put('Grafana', $data);
+                    break;
+                case str($image)?->contains('directus'):
+                    $data = collect([]);
+                    $admin_email = $this->environment_variables()->where('key', 'ADMIN_EMAIL')->first();
+                    $admin_password = $this->environment_variables()->where('key', 'SERVICE_PASSWORD_ADMIN')->first();
+
+                    if ($admin_email) {
+                        $data = $data->merge([
+                            'Admin Email' => [
+                                'key' => data_get($admin_email, 'key'),
+                                'value' => data_get($admin_email, 'value'),
+                                'rules' => 'required|email',
+                            ],
+                        ]);
+                    }
+                    if ($admin_password) {
+                        $data = $data->merge([
+                            'Admin Password' => [
+                                'key' => data_get($admin_password, 'key'),
+                                'value' => data_get($admin_password, 'value'),
+                                'rules' => 'required',
+                                'isPassword' => true,
+                            ],
+                        ]);
+                    }
+                    $fields->put('Directus', $data);
+                    break;
+                case str($image)?->contains('kong'):
+                    $data = collect([]);
+                    $dashboard_user = $this->environment_variables()->where('key', 'SERVICE_USER_ADMIN')->first();
+                    $dashboard_password = $this->environment_variables()->where('key', 'SERVICE_PASSWORD_ADMIN')->first();
+                    if ($dashboard_user) {
+                        $data = $data->merge([
+                            'Dashboard User' => [
+                                'key' => data_get($dashboard_user, 'key'),
+                                'value' => data_get($dashboard_user, 'value'),
+                                'rules' => 'required',
+                            ],
+                        ]);
+                    }
+                    if ($dashboard_password) {
+                        $data = $data->merge([
+                            'Dashboard Password' => [
+                                'key' => data_get($dashboard_password, 'key'),
+                                'value' => data_get($dashboard_password, 'value'),
+                                'rules' => 'required',
+                                'isPassword' => true,
+                            ],
+                        ]);
+                    }
+                    $fields->put('Supabase', $data->toArray());
                 case str($image)?->contains('minio'):
                     $data = collect([]);
                     $console_url = $this->environment_variables()->where('key', 'MINIO_BROWSER_REDIRECT_URL')->first();
@@ -130,6 +253,20 @@ class Service extends BaseModel
                         ]);
                     }
                     $fields->put('Weblate', $data);
+                    break;
+                case str($image)?->contains('meilisearch'):
+                    $data = collect([]);
+                    $SERVICE_PASSWORD_MEILISEARCH = $this->environment_variables()->where('key', 'SERVICE_PASSWORD_MEILISEARCH')->first();
+                    if ($SERVICE_PASSWORD_MEILISEARCH) {
+                        $data = $data->merge([
+                            'API Key' => [
+                                'key' => data_get($SERVICE_PASSWORD_MEILISEARCH, 'key'),
+                                'value' => data_get($SERVICE_PASSWORD_MEILISEARCH, 'value'),
+                                'isPassword' => true,
+                            ],
+                        ]);
+                    }
+                    $fields->put('Meilisearch', $data);
                     break;
                 case str($image)?->contains('ghost'):
                     $data = collect([]);
@@ -375,7 +512,7 @@ class Service extends BaseModel
     public function documentation()
     {
         $services = getServiceTemplates();
-        $service = data_get($services, Str::of($this->name)->beforeLast('-')->value, []);
+        $service = data_get($services, str($this->name)->beforeLast('-')->value, []);
         return data_get($service, 'documentation', config('constants.docs.base_url'));
     }
     public function applications()
@@ -410,6 +547,10 @@ class Service extends BaseModel
         }
         return null;
     }
+    public function scheduled_tasks(): HasMany
+    {
+        return $this->hasMany(ScheduledTask::class)->orderBy('name', 'asc');
+    }
     public function environment_variables(): HasMany
     {
         return $this->hasMany(EnvironmentVariable::class)->orderBy('key', 'asc');
@@ -433,7 +574,7 @@ class Service extends BaseModel
         $envs = $this->environment_variables()->get();
         $commands[] = "rm -f .env || true";
         foreach ($envs as $env) {
-            $commands[] = "echo '{$env->key}={$env->value}' >> .env";
+            $commands[] = "echo '{$env->key}={$env->real_value}' >> .env";
         }
         if ($envs->count() === 0) {
             $commands[] = "touch .env";

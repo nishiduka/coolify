@@ -48,7 +48,27 @@ class Team extends Model implements SendsDiscord, SendsEmail
         }
         return explode(',', $recipients);
     }
-
+    static public function serverLimitReached()
+    {
+        $serverLimit = Team::serverLimit();
+        $team = currentTeam();
+        $servers = $team->servers->count();
+        return $servers >= $serverLimit;
+    }
+    public function serverOverflow()
+    {
+        if ($this->serverLimit() < $this->servers->count()) {
+            return true;
+        }
+        return false;
+    }
+    static public function serverLimit()
+    {
+        if (currentTeam()->id === 0 && isDev()) {
+            return 9999999;
+        }
+        return Team::find(currentTeam()->id)->limits['serverLimit'];
+    }
     public function limits(): Attribute
     {
         return Attribute::make(
@@ -63,14 +83,21 @@ class Team extends Model implements SendsDiscord, SendsEmail
                         $subscription = $subscription->type();
                     }
                 }
-                $serverLimit = config('constants.limits.server')[strtolower($subscription)];
+                if ($this->custom_server_limit) {
+                    $serverLimit = $this->custom_server_limit;
+                } else {
+                    $serverLimit = config('constants.limits.server')[strtolower($subscription)];
+                }
                 $sharedEmailEnabled = config('constants.limits.email')[strtolower($subscription)];
                 return ['serverLimit' => $serverLimit, 'sharedEmailEnabled' => $sharedEmailEnabled];
             }
 
         );
     }
-
+    public function environment_variables()
+    {
+        return $this->hasMany(SharedEnvironmentVariable::class)->whereNull('project_id')->whereNull('environment_id');
+    }
     public function members()
     {
         return $this->belongsToMany(User::class, 'team_user', 'team_id', 'user_id')->withPivot('role');
@@ -119,7 +146,6 @@ class Team extends Model implements SendsDiscord, SendsEmail
         $sources = collect([]);
         $github_apps = $this->hasMany(GithubApp::class)->whereisPublic(false)->get();
         $gitlab_apps = $this->hasMany(GitlabApp::class)->whereisPublic(false)->get();
-        // $bitbucket_apps = $this->hasMany(BitbucketApp::class)->get();
         $sources = $sources->merge($github_apps)->merge($gitlab_apps);
         return $sources;
     }
@@ -128,7 +154,8 @@ class Team extends Model implements SendsDiscord, SendsEmail
     {
         return $this->hasMany(S3Storage::class)->where('is_usable', true);
     }
-    public function trialEnded() {
+    public function trialEnded()
+    {
         foreach ($this->servers as $server) {
             $server->settings()->update([
                 'is_usable' => false,
@@ -136,12 +163,23 @@ class Team extends Model implements SendsDiscord, SendsEmail
             ]);
         }
     }
-    public function trialEndedButSubscribed() {
+    public function trialEndedButSubscribed()
+    {
         foreach ($this->servers as $server) {
             $server->settings()->update([
                 'is_usable' => true,
                 'is_reachable' => true,
             ]);
         }
+    }
+    public function isAnyNotificationEnabled()
+    {
+        if (isCloud()) {
+            return true;
+        }
+        if ($this->smtp_enabled || $this->resend_enabled || $this->discord_enabled || $this->telegram_enabled || $this->use_instance_email_settings) {
+            return true;
+        }
+        return false;
     }
 }

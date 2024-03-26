@@ -2,7 +2,9 @@
 
 namespace App\Jobs;
 
+use App\Actions\Server\CleanupDocker;
 use App\Models\Server;
+use App\Notifications\Server\DockerCleanup;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeEncrypted;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -43,13 +45,12 @@ class DockerCleanupJob implements ShouldQueue, ShouldBeEncrypted
             ray('Usage before: ' . $this->usageBefore);
             if ($this->usageBefore >= $this->server->settings->cleanup_after_percentage) {
                 ray('Cleaning up ' . $this->server->name);
-                instant_remote_process(['docker image prune -af'], $this->server, false);
-                instant_remote_process(['docker container prune -f --filter "label=coolify.managed=true"'], $this->server, false);
-                instant_remote_process(['docker builder prune -af'], $this->server, false);
+                CleanupDocker::run($this->server);
                 $usageAfter = $this->server->getDiskUsage();
                 if ($usageAfter <  $this->usageBefore) {
-                    ray('Saved ' . ($this->usageBefore - $usageAfter) . '% disk space on ' . $this->server->name);
-                    send_internal_notification('DockerCleanupJob done: Saved ' . ($this->usageBefore - $usageAfter) . '% disk space on ' . $this->server->name);
+                    $this->server->team?->notify(new DockerCleanup($this->server, 'Saved ' . ($this->usageBefore - $usageAfter) . '% disk space.'));
+                    // ray('Saved ' . ($this->usageBefore - $usageAfter) . '% disk space on ' . $this->server->name);
+                    // send_internal_notification('DockerCleanupJob done: Saved ' . ($this->usageBefore - $usageAfter) . '% disk space on ' . $this->server->name);
                     Log::info('DockerCleanupJob done: Saved ' . ($this->usageBefore - $usageAfter) . '% disk space on ' . $this->server->name);
                 } else {
                     Log::info('DockerCleanupJob failed to save disk space on ' . $this->server->name);

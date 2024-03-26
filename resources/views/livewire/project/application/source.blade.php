@@ -1,5 +1,5 @@
 <div>
-    <form wire:submit.prevent='submit' class="flex flex-col">
+    <form wire:submit='submit' class="flex flex-col">
         <div class="flex items-center gap-2">
             <h2>Source</h2>
             <x-forms.button type="submit">Save</x-forms.button>
@@ -37,7 +37,7 @@
         @isset($application->private_key_id)
             <h3 class="pt-4">Deploy Key</h3>
             <div class="py-2 pt-4">Currently attached Private Key: <span
-                    class="text-warning">{{ $application->private_key->name }}</span>
+                    class="dark:text-warning">{{ $application->private_key->name }}</span>
             </div>
 
             <h4 class="py-2 ">Select another Private Key</h4>

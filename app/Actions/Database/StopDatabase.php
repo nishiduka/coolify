@@ -2,6 +2,7 @@
 
 namespace App\Actions\Database;
 
+use App\Events\DatabaseStatusChanged;
 use App\Models\StandaloneMariadb;
 use App\Models\StandaloneMongodb;
 use App\Models\StandaloneMysql;
@@ -16,6 +17,9 @@ class StopDatabase
     public function handle(StandaloneRedis|StandalonePostgresql|StandaloneMongodb|StandaloneMysql|StandaloneMariadb $database)
     {
         $server = $database->destination->server;
+        if (!$server->isFunctional()) {
+            return 'Server is not functional';
+        }
         instant_remote_process(
             ["docker rm -f {$database->uuid}"],
             $server

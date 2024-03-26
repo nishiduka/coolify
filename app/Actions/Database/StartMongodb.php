@@ -63,8 +63,7 @@ class StartMongodb
                     'memswap_limit' => $this->database->limits_memory_swap,
                     'mem_swappiness' => $this->database->limits_memory_swappiness,
                     'mem_reservation' => $this->database->limits_memory_reservation,
-                    'cpus' => (int) $this->database->limits_cpus,
-                    'cpuset' => $this->database->limits_cpuset,
+                    'cpus' => (float) $this->database->limits_cpus,
                     'cpu_shares' => $this->database->limits_cpu_shares,
                 ]
             ],
@@ -76,6 +75,9 @@ class StartMongodb
                 ]
             ]
         ];
+        if (!is_null($this->database->limits_cpuset)) {
+            data_set($docker_compose, "services.{$container_name}.cpuset", $this->database->limits_cpuset);
+        }
         if ($this->database->destination->server->isLogDrainEnabled() && $this->database->isLogDrainEnabled()) {
             $docker_compose['services'][$container_name]['logging'] = [
                 'driver' => 'fluentd',
@@ -120,8 +122,8 @@ class StartMongodb
         $this->commands[] = "echo 'Pulling {$database->image} image.'";
         $this->commands[] = "docker compose -f $this->configuration_dir/docker-compose.yml pull";
         $this->commands[] = "docker compose -f $this->configuration_dir/docker-compose.yml up -d";
-        $this->commands[] = "echo '{$database->name} started.'";
-        return remote_process($this->commands, $database->destination->server);
+        $this->commands[] = "echo 'Database started.'";
+        return remote_process($this->commands, $database->destination->server, callEventOnFinish: 'DatabaseStatusChanged');
     }
 
     private function generate_local_persistent_volumes()
@@ -154,7 +156,7 @@ class StartMongodb
     {
         $environment_variables = collect();
         foreach ($this->database->runtime_environment_variables as $env) {
-            $environment_variables->push("$env->key=$env->value");
+            $environment_variables->push("$env->key=$env->real_value");
         }
 
         if ($environment_variables->filter(fn ($env) => Str::of($env)->contains('MONGO_INITDB_ROOT_USERNAME'))->isEmpty()) {

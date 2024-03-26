@@ -7,15 +7,14 @@ use App\Actions\Fortify\ResetUserPassword;
 use App\Actions\Fortify\UpdateUserPassword;
 use App\Actions\Fortify\UpdateUserProfileInformation;
 use App\Models\InstanceSettings;
+use App\Models\OauthSetting;
 use App\Models\User;
-use App\Models\Waitlist;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Laravel\Fortify\Contracts\RegisterResponse;
-use Laravel\Fortify\Features;
 use Laravel\Fortify\Fortify;
 
 class FortifyServiceProvider extends ServiceProvider
@@ -31,9 +30,9 @@ class FortifyServiceProvider extends ServiceProvider
             {
                 // First user (root) will be redirected to /settings instead of / on registration.
                 if ($request->user()->currentTeam->id === 0) {
-                    return redirect('/settings');
+                    return redirect()->route('settings.index');
                 }
-                return redirect('/');
+                return redirect(RouteServiceProvider::HOME);
             }
         });
     }
@@ -58,13 +57,15 @@ class FortifyServiceProvider extends ServiceProvider
 
         Fortify::loginView(function () {
             $settings = InstanceSettings::get();
+            $enabled_oauth_providers = OauthSetting::where('enabled', true)->get();
             $users = User::count();
             if ($users == 0) {
                 // If there are no users, redirect to registration
                 return redirect()->route('register');
             }
             return view('auth.login', [
-                'is_registration_enabled' => $settings->is_registration_enabled
+                'is_registration_enabled' => $settings->is_registration_enabled,
+                'enabled_oauth_providers' => $enabled_oauth_providers,
             ]);
         });
 
@@ -76,7 +77,11 @@ class FortifyServiceProvider extends ServiceProvider
             ) {
                 $user->updated_at = now();
                 $user->save();
-                session(['currentTeam' => $user->currentTeam = $user->teams->firstWhere('personal_team', true)]);
+                $user->currentTeam = $user->teams->firstWhere('personal_team', true);
+                if (!$user->currentTeam) {
+                    $user->currentTeam = $user->recreate_personal_team();
+                }
+                session(['currentTeam' => $user->currentTeam]);
                 return $user;
             }
         });

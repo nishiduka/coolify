@@ -3,10 +3,11 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class ServiceDatabase extends BaseModel
 {
-    use HasFactory;
+    use HasFactory, SoftDeletes;
     protected $guarded = [];
 
     protected static function booted()
@@ -16,9 +17,22 @@ class ServiceDatabase extends BaseModel
             $service->fileStorages()->delete();
         });
     }
+    public function restart()
+    {
+        $container_id = $this->name . '-' . $this->service->uuid;
+        remote_process(["docker restart {$container_id}"], $this->service->server);
+    }
     public function isLogDrainEnabled()
     {
         return data_get($this, 'is_log_drain_enabled', false);
+    }
+    public function isStripprefixEnabled()
+    {
+        return data_get($this, 'is_stripprefix_enabled', true);
+    }
+    public function isGzipEnabled()
+    {
+        return data_get($this, 'is_gzip_enabled', true);
     }
     public function type()
     {
@@ -43,8 +57,7 @@ class ServiceDatabase extends BaseModel
         if ($this->service->server->isLocalhost() || isDev()) {
             $realIp = base_ip();
         }
-        $url = "{$realIp}:{$port}";
-        return $url;
+        return "{$realIp}:{$port}";
     }
     public function service()
     {

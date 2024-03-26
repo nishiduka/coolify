@@ -18,13 +18,13 @@ class UpdateCoolify
         try {
             $settings = InstanceSettings::get();
             ray('Running InstanceAutoUpdateJob');
-            $this->server = Server::find(0)->first();
+            $this->server = Server::find(0);
             if (!$this->server) {
                 return;
             }
+            CleanupDocker::run($this->server, false);
             $this->latestVersion = get_latest_version_of_coolify();
             $this->currentVersion = config('version');
-            ray('latest version:' . $this->latestVersion . " current version: " . $this->currentVersion . ' force: ' . $force);
             if ($settings->next_channel) {
                 ray('next channel enabled');
                 $this->latestVersion = 'next';
@@ -43,7 +43,7 @@ class UpdateCoolify
                 }
                 $this->update();
             }
-            send_internal_notification('InstanceAutoUpdateJob done to version: ' . $this->latestVersion . ' from version: ' . $this->currentVersion);
+            send_internal_notification("Instance updated from {$this->currentVersion} -> {$this->latestVersion}");
         } catch (\Throwable $e) {
             ray('InstanceAutoUpdateJob failed');
             ray($e->getMessage());

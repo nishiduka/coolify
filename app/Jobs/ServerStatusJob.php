@@ -16,31 +16,38 @@ class ServerStatusJob implements ShouldQueue, ShouldBeEncrypted
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public ?int $disk_usage = null;
+    public int|string|null $disk_usage = null;
+    public $tries = 4;
+    public function backoff(): int
+    {
+        return isDev() ? 1 : 3;
+    }
     public function __construct(public Server $server)
     {
     }
     public function middleware(): array
     {
-        return [(new WithoutOverlapping($this->server->id))->dontRelease()];
+        return [(new WithoutOverlapping($this->server->uuid))];
     }
 
     public function uniqueId(): int
     {
-        return $this->server->id;
+        return $this->server->uuid;
     }
 
-    public function handle(): void
+    public function handle()
     {
-        ray("checking server status for {$this->server->id}");
+        if (!$this->server->isServerReady($this->tries)) {
+            throw new \RuntimeException('Server is not ready.');
+        };
         try {
-            if ($this->server->isServerReady()) {
+            if ($this->server->isFunctional()) {
                 $this->cleanup(notify: false);
             }
         } catch (\Throwable $e) {
             send_internal_notification('ServerStatusJob failed with: ' . $e->getMessage());
             ray($e->getMessage());
-            handleError($e);
+            return handleError($e);
         }
     }
     public function cleanup(bool $notify = false): void
@@ -54,7 +61,7 @@ class ServerStatusJob implements ShouldQueue, ShouldBeEncrypted
                 } else {
                     $this->server->high_disk_usage_notification_sent = true;
                     $this->server->save();
-                    $this->server->team->notify(new HighDiskUsage($this->server, $this->disk_usage, $this->server->settings->cleanup_after_percentage));
+                    $this->server->team?->notify(new HighDiskUsage($this->server, $this->disk_usage, $this->server->settings->cleanup_after_percentage));
                 }
             } else {
                 DockerCleanupJob::dispatchSync($this->server);

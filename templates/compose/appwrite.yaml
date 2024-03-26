@@ -1,7 +1,8 @@
-# documentation: https://appwrite.io/docs
-# slogan: Appwrite is a self-hosted backend-as-a-service platform that simplifies the development of web and mobile applications by providing a range of features and APIs.
+# documentation: https://appwrite.io
+# slogan: Appwrite is backend-as-a-service platform that simplifies the web & mobile app development.
 # env_file: appwrite.env
 # tags: backend-as-a-service, platform
+# logo: svgs/appwrite.svg
 
 
 x-logging: &x-logging
@@ -565,7 +566,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - appwrite-builds:/storage/builds:rw
       - appwrite-functions:/storage/functions:rw
-      # Host mount nessessary to share files between executor and runtimes.
+      # Host mount necessary to share files between executor and runtimes.
       # It's not possible to share mount file between 2 containers without host mount (copying is too slow)
       - /tmp:/tmp:rw
     environment:

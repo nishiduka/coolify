@@ -1,5 +1,4 @@
 <x-emails.layout>
-
 You have been invited to "{{ $team }}" on "{{ config('app.name') }}".
 
 Please [click here]({{ $invitation_link }}) to accept the invitation.

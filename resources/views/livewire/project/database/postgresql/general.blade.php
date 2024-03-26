@@ -1,6 +1,6 @@
 <div>
     <dialog id="newInitScript" class="modal">
-        <form method="dialog" class="flex flex-col gap-2 rounded modal-box" wire:submit.prevent='save_new_init_script'>
+        <form method="dialog" class="flex flex-col gap-2 rounded modal-box" wire:submit='save_new_init_script'>
             <h3 class="text-lg font-bold">Add Init Script</h3>
             <x-forms.input placeholder="create_test_db.sql" id="new_filename" label="Filename" required />
             <x-forms.textarea placeholder="CREATE DATABASE test;" id="new_content" label="Content" required />
@@ -13,7 +13,7 @@
         </form>
     </dialog>
 
-    <form wire:submit.prevent="submit" class="flex flex-col gap-2">
+    <form wire:submit="submit" class="flex flex-col gap-2">
         <div class="flex items-center gap-2">
             <h2>General</h2>
             <x-forms.button type="submit">
@@ -29,7 +29,7 @@
 
         @if ($database->started_at)
             <div class="flex gap-2">
-                <x-forms.input label="Initial Username" id="database.postgres_username" placeholder="If empty: postgres"
+                <x-forms.input label="Initial Username" id="database.postgres_user" placeholder="If empty: postgres"
                     readonly helper="You can only change this in the database." />
                 <x-forms.input label="Initial Password" id="database.postgres_password" type="password" required
                     readonly helper="You can only change this in the database." />
@@ -38,7 +38,7 @@
                     helper="You can only change this in the database." />
             </div>
         @else
-            <div class="pt-8 text-warning">Please verify these values. You can only modify them before the initial
+            <div class="pt-8 dark:text-warning">Please verify these values. You can only modify them before the initial
                 start. After that, you need to modify it in the database.
             </div>
             <div class="flex gap-2 pb-8">
@@ -58,7 +58,7 @@
             <h3 class="py-2">Network</h3>
             <div class="flex items-end gap-2">
                 <x-forms.input placeholder="3000:5432" id="database.ports_mappings" label="Ports Mappings"
-                    helper="A comma separated list of ports you would like to map to the host system.<br><span class='inline-block font-bold text-warning'>Example</span>3000:5432,3002:5433" />
+                    helper="A comma separated list of ports you would like to map to the host system.<br><span class='inline-block font-bold dark:text-warning'>Example</span>3000:5432,3002:5433" />
                 <x-forms.input placeholder="5432" disabled="{{ $database->is_public }}" id="database.public_port"
                     label="Public Port" />
                 <x-forms.checkbox instantSave id="database.is_public" label="Accessible over the internet" />
@@ -76,13 +76,23 @@
     </form>
     <h3 class="pt-4">Advanced</h3>
     <div class="flex flex-col">
-        <x-forms.checkbox helper="Drain logs to your configured log drain endpoint in your Server settings." instantSave="instantSaveAdvanced"
-            id="database.is_log_drain_enabled" label="Drain Logs" />
+        <x-forms.checkbox helper="Drain logs to your configured log drain endpoint in your Server settings."
+            instantSave="instantSaveAdvanced" id="database.is_log_drain_enabled" label="Drain Logs" />
     </div>
     <div class="pb-16">
         <div class="flex gap-2 pt-4 pb-2">
             <h3>Initialization scripts</h3>
-            <x-forms.button class="btn" onclick="newInitScript.showModal()">+ Add</x-forms.button>
+            <x-modal-input buttonTitle="+ Add" title="New Init Script">
+                <form class="flex flex-col w-full gap-2 rounded" wire:submit='save_new_init_script'>
+                    <x-forms.input autofocus placeholder="create_test_db.sql" id="new_filename" label="Filename"
+                        required />
+                    <x-forms.textarea rows="20" placeholder="CREATE DATABASE test;" id="new_content"
+                        label="Content" required />
+                    <x-forms.button type="submit">
+                        Save
+                    </x-forms.button>
+                </form>
+            </x-modal-input>
         </div>
         <div class="flex flex-col gap-2">
             @forelse(data_get($database,'init_scripts', []) as $script)

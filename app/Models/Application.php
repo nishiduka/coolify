@@ -2,8 +2,10 @@
 
 namespace App\Models;
 
+use App\Enums\ApplicationDeploymentStatus;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Spatie\Activitylog\Models\Activity;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -12,8 +14,8 @@ use Visus\Cuid2\Cuid2;
 
 class Application extends BaseModel
 {
+    use SoftDeletes;
     protected $guarded = [];
-
     protected static function booted()
     {
         static::saving(function ($application) {
@@ -35,6 +37,7 @@ class Application extends BaseModel
             ]);
         });
         static::deleting(function ($application) {
+            $application->update(['fqdn' => null]);
             $application->settings()->delete();
             $storages = $application->persistentStorages()->get();
             $server = data_get($application, 'destination.server');
@@ -46,7 +49,48 @@ class Application extends BaseModel
             $application->persistentStorages()->delete();
             $application->environment_variables()->delete();
             $application->environment_variables_preview()->delete();
+            foreach ($application->scheduled_tasks as $task) {
+                $task->delete();
+            }
+            $application->tags()->detach();
         });
+    }
+
+    public function additional_servers()
+    {
+        return $this->belongsToMany(Server::class, 'additional_destinations')
+            ->withPivot('standalone_docker_id', 'status');
+    }
+    public function additional_networks()
+    {
+        return $this->belongsToMany(StandaloneDocker::class, 'additional_destinations')
+            ->withPivot('server_id', 'status');
+    }
+    public function is_public_repository(): bool
+    {
+        if (data_get($this, 'source.is_public')) {
+            return true;
+        }
+        return false;
+    }
+    public function is_github_based(): bool
+    {
+        if (data_get($this, 'source')) {
+            return true;
+        }
+        return false;
+    }
+    public function isForceHttpsEnabled()
+    {
+        return data_get($this, 'settings.is_force_https_enabled', false);
+    }
+    public function isStripprefixEnabled()
+    {
+        return data_get($this, 'settings.is_stripprefix_enabled', true);
+    }
+    public function isGzipEnabled()
+    {
+        return data_get($this, 'settings.is_gzip_enabled', true);
     }
     public function link()
     {
@@ -179,9 +223,6 @@ class Application extends BaseModel
             set: fn ($value) => $value === "" ? null : $value,
         );
     }
-
-    // Normal Deployments
-
     public function portsMappingsArray(): Attribute
     {
         return Attribute::make(
@@ -189,6 +230,79 @@ class Application extends BaseModel
                 ? []
                 : explode(',', $this->ports_mappings),
 
+        );
+    }
+    public function isExited()
+    {
+        return (bool) str($this->status)->startsWith('exited');
+    }
+    public function realStatus()
+    {
+        return $this->getRawOriginal('status');
+    }
+    public function status(): Attribute
+    {
+        return Attribute::make(
+            set: function ($value) {
+                if ($this->additional_servers->count() === 0) {
+                    if (str($value)->contains('(')) {
+                        $status = str($value)->before('(')->trim()->value();
+                        $health = str($value)->after('(')->before(')')->trim()->value() ?? 'unhealthy';
+                    } else if (str($value)->contains(':')) {
+                        $status = str($value)->before(':')->trim()->value();
+                        $health = str($value)->after(':')->trim()->value() ?? 'unhealthy';
+                    } else {
+                        $status = $value;
+                        $health = 'unhealthy';
+                    }
+                    return "$status:$health";
+                } else {
+                    if (str($value)->contains('(')) {
+                        $status = str($value)->before('(')->trim()->value();
+                        $health = str($value)->after('(')->before(')')->trim()->value() ?? 'unhealthy';
+                    } else if (str($value)->contains(':')) {
+                        $status = str($value)->before(':')->trim()->value();
+                        $health = str($value)->after(':')->trim()->value() ?? 'unhealthy';
+                    } else {
+                        $status = $value;
+                        $health = 'unhealthy';
+                    }
+                    return "$status:$health";
+                }
+            },
+            get: function ($value) {
+                if ($this->additional_servers->count() === 0) {
+                    //running (healthy)
+                    if (str($value)->contains('(')) {
+                        $status = str($value)->before('(')->trim()->value();
+                        $health = str($value)->after('(')->before(')')->trim()->value() ?? 'unhealthy';
+                    } else if (str($value)->contains(':')) {
+                        $status = str($value)->before(':')->trim()->value();
+                        $health = str($value)->after(':')->trim()->value() ?? 'unhealthy';
+                    } else {
+                        $status = $value;
+                        $health = 'unhealthy';
+                    }
+                    return "$status:$health";
+                } else {
+                    $complex_status = null;
+                    $complex_health = null;
+                    $complex_status = $main_server_status = str($value)->before(':')->value();
+                    $complex_health = $main_server_health = str($value)->after(':')->value() ?? 'unhealthy';
+                    $additional_servers_status = $this->additional_servers->pluck('pivot.status');
+                    foreach ($additional_servers_status as $status) {
+                        $server_status = str($status)->before(':')->value();
+                        $server_health = str($status)->after(':')->value() ?? 'unhealthy';
+                        if ($main_server_status !== $server_status) {
+                            $complex_status = 'degraded';
+                        }
+                        if ($main_server_health !== $server_health) {
+                            $complex_health = 'unhealthy';
+                        }
+                    }
+                    return "$complex_status:$complex_health";
+                }
+            },
         );
     }
 
@@ -199,6 +313,18 @@ class Application extends BaseModel
                 ? []
                 : explode(',', $this->ports_exposes)
         );
+    }
+    public function tags()
+    {
+        return $this->morphToMany(Tag::class, 'taggable');
+    }
+    public function project()
+    {
+        return data_get($this, 'environment.project');
+    }
+    public function team()
+    {
+        return data_get($this, 'environment.project.team');
     }
     public function serviceType()
     {
@@ -252,6 +378,11 @@ class Application extends BaseModel
         return $this->hasMany(EnvironmentVariable::class)->where('is_preview', true)->where('key', 'like', 'NIXPACKS_%');
     }
 
+    public function scheduled_tasks(): HasMany
+    {
+        return $this->hasMany(ScheduledTask::class)->orderBy('name', 'asc');
+    }
+
     public function private_key()
     {
         return $this->belongsTo(PrivateKey::class);
@@ -278,13 +409,16 @@ class Application extends BaseModel
     }
     public function isDeploymentInprogress()
     {
-        $deployments = ApplicationDeploymentQueue::where('application_id', $this->id)->where('status', 'in_progress')->count();
+        $deployments = ApplicationDeploymentQueue::where('application_id', $this->id)->where('status', ApplicationDeploymentStatus::IN_PROGRESS)->where('status', ApplicationDeploymentStatus::QUEUED)->count();
         if ($deployments > 0) {
             return true;
         }
         return false;
     }
-
+    public function get_last_days_deployments()
+    {
+        return ApplicationDeploymentQueue::where('application_id', $this->id)->where('created_at', '>=', now()->subDays(7))->orderBy('created_at', 'desc')->get();
+    }
     public function deployments(int $skip = 0, int $take = 10)
     {
         $deployments = ApplicationDeploymentQueue::where('application_id', $this->id)->orderBy('created_at', 'desc');
@@ -319,6 +453,9 @@ class Application extends BaseModel
 
     public function deploymentType()
     {
+        if (isDev() && data_get($this, 'private_key_id') === 0) {
+            return 'deploy_key';
+        }
         if (data_get($this, 'private_key_id')) {
             return 'deploy_key';
         } else if (data_get($this, 'source')) {
@@ -352,15 +489,19 @@ class Application extends BaseModel
         }
         return false;
     }
+    public function workdir()
+    {
+        return application_configuration_dir() . "/{$this->uuid}";
+    }
     public function isLogDrainEnabled()
     {
         return data_get($this, 'settings.is_log_drain_enabled', false);
     }
-    public function isConfigurationChanged($save = false)
+    public function isConfigurationChanged(bool $save = false)
     {
-        $newConfigHash = $this->fqdn . $this->git_repository . $this->git_branch . $this->git_commit_sha . $this->build_pack . $this->static_image . $this->install_command  . $this->build_command . $this->start_command . $this->port_exposes . $this->port_mappings . $this->base_directory . $this->publish_directory . $this->health_check_path  . $this->health_check_port . $this->health_check_host . $this->health_check_method . $this->health_check_return_code . $this->health_check_scheme . $this->health_check_response_text . $this->health_check_interval . $this->health_check_timeout . $this->health_check_retries . $this->health_check_start_period . $this->health_check_enabled . $this->limits_memory  . $this->limits_swap . $this->limits_swappiness . $this->limits_reservation . $this->limits_cpus . $this->limits_cpuset . $this->limits_cpu_shares . $this->dockerfile . $this->dockerfile_location . $this->custom_labels;
-        if ($this->pull_request_id === 0) {
-            $newConfigHash .= json_encode($this->environment_variables->all());
+        $newConfigHash = $this->fqdn . $this->git_repository . $this->git_branch . $this->git_commit_sha . $this->build_pack . $this->static_image . $this->install_command  . $this->build_command . $this->start_command . $this->port_exposes . $this->port_mappings . $this->base_directory . $this->publish_directory . $this->dockerfile . $this->dockerfile_location . $this->custom_labels;
+        if ($this->pull_request_id === 0 || $this->pull_request_id === null) {
+            $newConfigHash .= json_encode($this->environment_variables());
         } else {
             $newConfigHash .= json_encode($this->environment_variables_preview->all());
         }
@@ -383,33 +524,6 @@ class Application extends BaseModel
             return true;
         }
     }
-    public function isMultipleServerDeployment()
-    {
-        if (isDev()) {
-            return true;
-        }
-        if (data_get($this, 'additional_destinations') && data_get($this, 'docker_registry_image_name')) {
-            return true;
-        }
-        return false;
-    }
-    public function healthCheckUrl()
-    {
-        if ($this->dockerfile || $this->build_pack === 'dockerfile' || $this->build_pack === 'dockerimage') {
-            return null;
-        }
-        if (!$this->health_check_port) {
-            $health_check_port = $this->ports_exposes_array[0];
-        } else {
-            $health_check_port = $this->health_check_port;
-        }
-        if ($this->health_check_path) {
-            $full_healthcheck_url = "{$this->health_check_scheme}://{$this->health_check_host}:{$health_check_port}{$this->health_check_path}";
-        } else {
-            $full_healthcheck_url = "{$this->health_check_scheme}://{$this->health_check_host}:{$health_check_port}/";
-        }
-        return $full_healthcheck_url;
-    }
     function customRepository()
     {
         preg_match('/(?<=:)\d+(?=\/)/', $this->git_repository, $matches);
@@ -431,21 +545,25 @@ class Application extends BaseModel
     {
         return "/artifacts/{$uuid}";
     }
-    function setGitImportSettings(string $deployment_uuid, string $git_clone_command)
+    function setGitImportSettings(string $deployment_uuid, string $git_clone_command, bool $public = false)
     {
         $baseDir = $this->generateBaseDir($deployment_uuid);
+
         if ($this->git_commit_sha !== 'HEAD') {
-            $git_clone_command = "{$git_clone_command} && cd {$baseDir} && git -c advice.detachedHead=false checkout {$this->git_commit_sha} >/dev/null 2>&1";
+            $git_clone_command = "{$git_clone_command} && cd {$baseDir} && GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" git -c advice.detachedHead=false checkout {$this->git_commit_sha} >/dev/null 2>&1";
         }
         if ($this->settings->is_git_submodules_enabled) {
-            $git_clone_command = "{$git_clone_command} && cd {$baseDir} && git submodule update --init --recursive";
+            if ($public) {
+                $git_clone_command = "{$git_clone_command} && cd {$baseDir} && sed -i \"s#git@\(.*\):#https://\\1/#g\" {$baseDir}/.gitmodules || true";
+            }
+            $git_clone_command = "{$git_clone_command} && cd {$baseDir} && GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" git submodule update --init --recursive";
         }
         if ($this->settings->is_git_lfs_enabled) {
-            $git_clone_command = "{$git_clone_command} && cd {$baseDir} && git lfs pull";
+            $git_clone_command = "{$git_clone_command} && cd {$baseDir} && GIT_SSH_COMMAND=\"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null\" git lfs pull";
         }
         return $git_clone_command;
     }
-    function generateGitImportCommands(string $deployment_uuid, int $pull_request_id = 0, ?string $git_type = null, bool $exec_in_docker = true, bool $only_checkout = false, ?string $custom_base_dir = null)
+    function generateGitImportCommands(string $deployment_uuid, int $pull_request_id = 0, ?string $git_type = null, bool $exec_in_docker = true, bool $only_checkout = false, ?string $custom_base_dir = null, ?string $commit = null)
     {
         $branch = $this->git_branch;
         ['repository' => $customRepository, 'port' => $customPort] = $this->customRepository();
@@ -458,7 +576,6 @@ class Application extends BaseModel
         if ($pull_request_id !== 0) {
             $pr_branch_name = "pr-{$pull_request_id}-coolify";
         }
-
         if ($this->deploymentType() === 'source') {
             $source_html_url = data_get($this, 'source.html_url');
             $url = parse_url(filter_var($source_html_url, FILTER_SANITIZE_URL));
@@ -470,7 +587,7 @@ class Application extends BaseModel
                     $fullRepoUrl = "{$this->source->html_url}/{$customRepository}";
                     $git_clone_command = "{$git_clone_command} {$this->source->html_url}/{$customRepository} {$baseDir}";
                     if (!$only_checkout) {
-                        $git_clone_command = $this->setGitImportSettings($deployment_uuid, $git_clone_command);
+                        $git_clone_command = $this->setGitImportSettings($deployment_uuid, $git_clone_command, public: true);
                     }
                     if ($exec_in_docker) {
                         $commands->push(executeInDocker($deployment_uuid, $git_clone_command));
@@ -510,7 +627,9 @@ class Application extends BaseModel
             }
             $private_key = base64_encode($private_key);
             $git_clone_command_base = "GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\" {$git_clone_command} {$customRepository} {$baseDir}";
-            if (!$only_checkout) {
+            if ($only_checkout) {
+                $git_clone_command = $git_clone_command_base;
+            } else {
                 $git_clone_command = $this->setGitImportSettings($deployment_uuid, $git_clone_command_base);
             }
             if ($exec_in_docker) {
@@ -535,8 +654,7 @@ class Application extends BaseModel
                         $commands->push("echo 'Checking out $branch'");
                     }
                     $git_clone_command = "{$git_clone_command} && cd {$baseDir} && GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\" git fetch origin $branch && git checkout $pr_branch_name";
-                }
-                if ($git_type === 'github') {
+                } else if ($git_type === 'github') {
                     $branch = "pull/{$pull_request_id}/head:$pr_branch_name";
                     if ($exec_in_docker) {
                         $commands->push(executeInDocker($deployment_uuid, "echo 'Checking out $branch'"));
@@ -544,6 +662,13 @@ class Application extends BaseModel
                         $commands->push("echo 'Checking out $branch'");
                     }
                     $git_clone_command = "{$git_clone_command} && cd {$baseDir} && GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\" git fetch origin $branch && git checkout $pr_branch_name";
+                } else if ($git_type === 'bitbucket') {
+                    if ($exec_in_docker) {
+                        $commands->push(executeInDocker($deployment_uuid, "echo 'Checking out $branch'"));
+                    } else {
+                        $commands->push("echo 'Checking out $branch'");
+                    }
+                    $git_clone_command = "{$git_clone_command} && cd {$baseDir} && GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\" git checkout $commit";
                 }
             }
 
@@ -561,7 +686,35 @@ class Application extends BaseModel
         if ($this->deploymentType() === 'other') {
             $fullRepoUrl = $customRepository;
             $git_clone_command = "{$git_clone_command} {$customRepository} {$baseDir}";
-            $git_clone_command = $this->setGitImportSettings($deployment_uuid, $git_clone_command);
+            $git_clone_command = $this->setGitImportSettings($deployment_uuid, $git_clone_command, public: true);
+
+            if ($pull_request_id !== 0) {
+                if ($git_type === 'gitlab') {
+                    $branch = "merge-requests/{$pull_request_id}/head:$pr_branch_name";
+                    if ($exec_in_docker) {
+                        $commands->push(executeInDocker($deployment_uuid, "echo 'Checking out $branch'"));
+                    } else {
+                        $commands->push("echo 'Checking out $branch'");
+                    }
+                    $git_clone_command = "{$git_clone_command} && cd {$baseDir} && GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\" git fetch origin $branch && git checkout $pr_branch_name";
+                } else if ($git_type === 'github') {
+                    $branch = "pull/{$pull_request_id}/head:$pr_branch_name";
+                    if ($exec_in_docker) {
+                        $commands->push(executeInDocker($deployment_uuid, "echo 'Checking out $branch'"));
+                    } else {
+                        $commands->push("echo 'Checking out $branch'");
+                    }
+                    $git_clone_command = "{$git_clone_command} && cd {$baseDir} && GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\" git fetch origin $branch && git checkout $pr_branch_name";
+                } else if ($git_type === 'bitbucket') {
+                    if ($exec_in_docker) {
+                        $commands->push(executeInDocker($deployment_uuid, "echo 'Checking out $branch'"));
+                    } else {
+                        $commands->push("echo 'Checking out $branch'");
+                    }
+                    $git_clone_command = "{$git_clone_command} && cd {$baseDir} && GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=30 -p {$customPort} -o Port={$customPort} -o LogLevel=ERROR -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /root/.ssh/id_rsa\" git checkout $commit";
+                }
+            }
+
             if ($exec_in_docker) {
                 $commands->push(executeInDocker($deployment_uuid, $git_clone_command));
             } else {
@@ -574,39 +727,68 @@ class Application extends BaseModel
             ];
         }
     }
-    public function prepareHelperImage(string $deploymentUuid)
+    function parseRawCompose()
     {
-        $basedir = $this->generateBaseDir($deploymentUuid);
-        $helperImage = config('coolify.helper_image');
-        $server = data_get($this, 'destination.server');
-        $network = data_get($this, 'destination.network');
-
-        $serverUserHomeDir = instant_remote_process(["echo \$HOME"], $server);
-        $dockerConfigFileExists = instant_remote_process(["test -f {$serverUserHomeDir}/.docker/config.json && echo 'OK' || echo 'NOK'"], $server);
-
-        $commands = collect([]);
-        if ($dockerConfigFileExists === 'OK') {
-            $commands->push([
-                "command" => "docker run -d --network $network -v /:/host --name $deploymentUuid --rm -v {$serverUserHomeDir}/.docker/config.json:/root/.docker/config.json:ro -v /var/run/docker.sock:/var/run/docker.sock $helperImage",
-                "hidden" => true,
-            ]);
-        } else {
-            $commands->push([
-                "command" => "docker run -d --network {$network} -v /:/host --name {$deploymentUuid} --rm -v /var/run/docker.sock:/var/run/docker.sock {$helperImage}",
-                "hidden" => true,
-            ]);
+        try {
+            $yaml = Yaml::parse($this->docker_compose_raw);
+        } catch (\Exception $e) {
+            throw new \Exception($e->getMessage());
         }
-        $commands->push([
-            "command" => executeInDocker($deploymentUuid, "mkdir -p {$basedir}"),
-            "hidden" => true,
-        ]);
-        return $commands;
+        $services = data_get($yaml, 'services');
+        $commands = collect([]);
+        $services = collect($services)->map(function ($service) use ($commands) {
+            $serviceVolumes = collect(data_get($service, 'volumes', []));
+            if ($serviceVolumes->count() > 0) {
+                foreach ($serviceVolumes as $volume) {
+                    $workdir = $this->workdir();
+                    $type = null;
+                    $source = null;
+                    if (is_string($volume)) {
+                        $source = Str::of($volume)->before(':');
+                        if ($source->startsWith('./') || $source->startsWith('/') || $source->startsWith('~')) {
+                            $type = Str::of('bind');
+                        }
+                    } else if (is_array($volume)) {
+                        $type = data_get_str($volume, 'type');
+                        $source = data_get_str($volume, 'source');
+                    }
+                    if ($type?->value() === 'bind') {
+                        if ($source->value() === "/var/run/docker.sock") {
+                            continue;
+                        }
+                        if ($source->value() === '/tmp' || $source->value() === '/tmp/') {
+                            continue;
+                        }
+                        if ($source->startsWith('.')) {
+                            $source = $source->after('.');
+                            $source = $workdir . $source;
+                        }
+                        $commands->push("mkdir -p $source > /dev/null 2>&1 || true");
+                    }
+                }
+            }
+            $labels = collect(data_get($service, 'labels', []));
+            if (!$labels->contains('coolify.managed')) {
+                $labels->push('coolify.managed=true');
+            }
+            if (!$labels->contains('coolify.applicationId')) {
+                $labels->push('coolify.applicationId=' . $this->id);
+            }
+            if (!$labels->contains('coolify.type')) {
+                $labels->push('coolify.type=application');
+            }
+            data_set($service, 'labels', $labels->toArray());
+            return $service;
+        });
+        data_set($yaml, 'services', $services->toArray());
+        $this->docker_compose_raw = Yaml::dump($yaml, 10, 2);
+
+        instant_remote_process($commands, $this->destination->server, false);
     }
     function parseCompose(int $pull_request_id = 0)
     {
         if ($this->docker_compose_raw) {
             $mainCompose = parseDockerComposeFile(resource: $this, isNew: false, pull_request_id: $pull_request_id);
-            ray($this->docker_compose_pr_raw);
             if ($this->getMorphClass() === 'App\Models\Application' && $this->docker_compose_pr_raw) {
                 parseDockerComposeFile(resource: $this, isNew: false, pull_request_id: $pull_request_id, is_pr: true);
             }
@@ -618,65 +800,107 @@ class Application extends BaseModel
     function loadComposeFile($isInit = false)
     {
         $initialDockerComposeLocation = $this->docker_compose_location;
-        // $initialDockerComposePrLocation = $this->docker_compose_pr_location;
-        if ($this->build_pack === 'dockercompose') {
-            if ($isInit && $this->docker_compose_raw) {
-                return;
-            }
-            $uuid = new Cuid2();
-            ['commands' => $cloneCommand] = $this->generateGitImportCommands(deployment_uuid: $uuid, only_checkout: true, exec_in_docker: false, custom_base_dir: '.');
-            $workdir = rtrim($this->base_directory, '/');
-            $composeFile = $this->docker_compose_location;
-            // $prComposeFile = $this->docker_compose_pr_location;
-            $fileList = collect([".$workdir$composeFile"]);
-            // if ($composeFile !== $prComposeFile) {
-            //     $fileList->push(".$prComposeFile");
-            // }
-            $commands = collect([
-                "mkdir -p /tmp/{$uuid} && cd /tmp/{$uuid}",
-                $cloneCommand,
-                "git sparse-checkout init --cone",
-                "git sparse-checkout set {$fileList->implode(' ')}",
-                "git read-tree -mu HEAD",
-                "cat .$workdir$composeFile",
-            ]);
-            $composeFileContent = instant_remote_process($commands, $this->destination->server, false);
-            if (!$composeFileContent) {
-                $this->docker_compose_location = $initialDockerComposeLocation;
-                $this->save();
-                throw new \Exception("Could not load base compose file from $workdir$composeFile");
-            } else {
-                $this->docker_compose_raw = $composeFileContent;
-                $this->save();
-            }
-            // if ($composeFile === $prComposeFile) {
-            //     $this->docker_compose_pr_raw = $composeFileContent;
-            //     $this->save();
-            // } else {
-            //     $commands = collect([
-            //         "cd /tmp/{$uuid}",
-            //         "cat .$workdir$prComposeFile",
-            //     ]);
-            //     $composePrFileContent = instant_remote_process($commands, $this->destination->server, false);
-            //     if (!$composePrFileContent) {
-            //         $this->docker_compose_pr_location = $initialDockerComposePrLocation;
-            //         $this->save();
-            //         throw new \Exception("Could not load compose file from $workdir$prComposeFile");
-            //     } else {
-            //         $this->docker_compose_pr_raw = $composePrFileContent;
-            //         $this->save();
-            //     }
-            // }
-
-            $commands = collect([
-                "rm -rf /tmp/{$uuid}",
-            ]);
-            instant_remote_process($commands, $this->destination->server, false);
-            return [
-                'parsedServices' => $this->parseCompose(),
-                'initialDockerComposeLocation' => $this->docker_compose_location,
-                'initialDockerComposePrLocation' => $this->docker_compose_pr_location,
-            ];
+        if ($isInit && $this->docker_compose_raw) {
+            return;
         }
+        $uuid = new Cuid2();
+        ['commands' => $cloneCommand] = $this->generateGitImportCommands(deployment_uuid: $uuid, only_checkout: true, exec_in_docker: false, custom_base_dir: '.');
+        $workdir = rtrim($this->base_directory, '/');
+        $composeFile = $this->docker_compose_location;
+        // $prComposeFile = $this->docker_compose_pr_location;
+        $fileList = collect([".$workdir$composeFile"]);
+        // if ($composeFile !== $prComposeFile) {
+        //     $fileList->push(".$prComposeFile");
+        // }
+        $commands = collect([
+            "rm -rf /tmp/{$uuid}",
+            "mkdir -p /tmp/{$uuid} && cd /tmp/{$uuid}",
+            $cloneCommand,
+            "git sparse-checkout init --cone",
+            "git sparse-checkout set {$fileList->implode(' ')}",
+            "git read-tree -mu HEAD",
+            "cat .$workdir$composeFile",
+        ]);
+        $composeFileContent = instant_remote_process($commands, $this->destination->server, false);
+        if (!$composeFileContent) {
+            $this->docker_compose_location = $initialDockerComposeLocation;
+            $this->save();
+            throw new \RuntimeException("Could not load base compose file from $workdir$composeFile");
+        } else {
+            $this->docker_compose_raw = $composeFileContent;
+            $this->save();
+        }
+        // if ($composeFile === $prComposeFile) {
+        //     $this->docker_compose_pr_raw = $composeFileContent;
+        //     $this->save();
+        // } else {
+        //     $commands = collect([
+        //         "cd /tmp/{$uuid}",
+        //         "cat .$workdir$prComposeFile",
+        //     ]);
+        //     $composePrFileContent = instant_remote_process($commands, $this->destination->server, false);
+        //     if (!$composePrFileContent) {
+        //         $this->docker_compose_pr_location = $initialDockerComposePrLocation;
+        //         $this->save();
+        //         throw new \Exception("Could not load compose file from $workdir$prComposeFile");
+        //     } else {
+        //         $this->docker_compose_pr_raw = $composePrFileContent;
+        //         $this->save();
+        //     }
+        // }
+
+        $commands = collect([
+            "rm -rf /tmp/{$uuid}",
+        ]);
+        instant_remote_process($commands, $this->destination->server, false);
+        $parsedServices = $this->parseCompose();
+        if ($this->docker_compose_domains) {
+            $json = collect(json_decode($this->docker_compose_domains));
+            $names = collect(data_get($parsedServices, 'services'))->keys()->toArray();
+            $jsonNames = $json->keys()->toArray();
+            $diff = array_diff($jsonNames, $names);
+            $json = $json->filter(function ($value, $key) use ($diff) {
+                return !in_array($key, $diff);
+            });
+            if ($json) {
+                $this->docker_compose_domains = json_encode($json);
+            } else {
+                $this->docker_compose_domains = null;
+            }
+            $this->save();
+        }
+        return [
+            'parsedServices' => $parsedServices,
+            'initialDockerComposeLocation' => $this->docker_compose_location,
+            'initialDockerComposePrLocation' => $this->docker_compose_pr_location,
+        ];
+    }
+    function parseContainerLabels(?ApplicationPreview $preview = null)
+    {
+        $customLabels = data_get($this, 'custom_labels');
+        if (!$customLabels) {
+            return;
+        }
+        if (base64_encode(base64_decode($customLabels, true)) !== $customLabels) {
+            ray('custom_labels is not base64 encoded');
+            $this->custom_labels = str($customLabels)->replace(',', "\n");
+            $this->custom_labels = base64_encode($customLabels);
+        }
+        $customLabels = base64_decode($this->custom_labels);
+        if (mb_detect_encoding($customLabels, 'ASCII', true) === false) {
+            ray('custom_labels contains non-ascii characters');
+            $customLabels = str(implode("|", generateLabelsApplication($this, $preview)))->replace("|", "\n");
+        }
+        $this->custom_labels = base64_encode($customLabels);
+        $this->save();
+        return $customLabels;
+    }
+    public function fqdns(): Attribute
+    {
+        return Attribute::make(
+            get: fn () => is_null($this->fqdn)
+                ? []
+                : explode(',', $this->fqdn),
+        );
     }
 }

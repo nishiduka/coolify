@@ -4,23 +4,37 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Support\Facades\Cache;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class ServiceApplication extends BaseModel
 {
-    use HasFactory;
+    use HasFactory, SoftDeletes;
     protected $guarded = [];
 
     protected static function booted()
     {
         static::deleting(function ($service) {
+            $service->update(['fqdn' => null]);
             $service->persistentStorages()->delete();
             $service->fileStorages()->delete();
         });
     }
+    public function restart()
+    {
+        $container_id = $this->name . '-' . $this->service->uuid;
+        instant_remote_process(["docker restart {$container_id}"], $this->service->server);
+    }
     public function isLogDrainEnabled()
     {
         return data_get($this, 'is_log_drain_enabled', false);
+    }
+    public function isStripprefixEnabled()
+    {
+        return data_get($this, 'is_stripprefix_enabled', true);
+    }
+    public function isGzipEnabled()
+    {
+        return data_get($this, 'is_gzip_enabled', true);
     }
     public function type()
     {
@@ -54,7 +68,6 @@ class ServiceApplication extends BaseModel
             get: fn () => is_null($this->fqdn)
                 ? []
                 : explode(',', $this->fqdn),
-
         );
     }
     public function getFilesFromServer(bool $isInit = false)

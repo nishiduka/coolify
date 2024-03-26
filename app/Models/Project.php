@@ -27,7 +27,10 @@ class Project extends BaseModel
             $project->settings()->delete();
         });
     }
-
+    public function environment_variables()
+    {
+        return $this->hasMany(SharedEnvironmentVariable::class);
+    }
     public function environments()
     {
         return $this->hasMany(Environment::class);
@@ -43,6 +46,10 @@ class Project extends BaseModel
         return $this->belongsTo(Team::class);
     }
 
+    public function services()
+    {
+        return $this->hasManyThrough(Service::class, Environment::class);
+    }
     public function applications()
     {
         return $this->hasManyThrough(Application::class, Environment::class);
@@ -62,10 +69,14 @@ class Project extends BaseModel
     }
     public function mysqls()
     {
-        return $this->hasMany(StandaloneMysql::class, Environment::class);
+        return $this->hasManyThrough(StandaloneMysql::class, Environment::class);
     }
     public function mariadbs()
     {
-        return $this->hasMany(StandaloneMariadb::class, Environment::class);
+        return $this->hasManyThrough(StandaloneMariadb::class, Environment::class);
+    }
+    public function resource_count()
+    {
+        return $this->applications()->count() + $this->postgresqls()->count() + $this->redis()->count() + $this->mongodbs()->count() + $this->mysqls()->count() + $this->mariadbs()->count();
     }
 }

@@ -2,23 +2,68 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\InstanceSettings;
-use App\Models\S3Storage;
-use App\Models\StandalonePostgresql;
+use App\Events\TestEvent;
 use App\Models\TeamInvitation;
 use App\Models\User;
+use App\Providers\RouteServiceProvider;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Illuminate\Foundation\Auth\EmailVerificationRequest;
 use Illuminate\Foundation\Validation\ValidatesRequests;
+use Illuminate\Http\Request;
 use Illuminate\Routing\Controller as BaseController;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
+use Laravel\Fortify\Fortify;
+use Laravel\Fortify\Contracts\FailedPasswordResetLinkRequestResponse;
+use Laravel\Fortify\Contracts\SuccessfulPasswordResetLinkRequestResponse;
+use Illuminate\Support\Facades\Password;
 
 class Controller extends BaseController
 {
     use AuthorizesRequests, ValidatesRequests;
 
+    public function realtime_test() {
+        if (auth()->user()?->currentTeam()->id !== 0) {
+            return redirect(RouteServiceProvider::HOME);
+        }
+        TestEvent::dispatch();
+        return 'Look at your other tab.';
+    }
+    public function verify() {
+        return view('auth.verify-email');
+    }
+    public function email_verify(EmailVerificationRequest $request) {
+        $request->fulfill();
+        $name = request()->user()?->name;
+        send_internal_notification("User {$name} verified their email address.");
+        return redirect(RouteServiceProvider::HOME);
+    }
+    public function forgot_password(Request $request) {
+        if (is_transactional_emails_active()) {
+            $arrayOfRequest = $request->only(Fortify::email());
+            $request->merge([
+                'email' => Str::lower($arrayOfRequest['email']),
+            ]);
+            $type = set_transanctional_email_settings();
+            if (!$type) {
+                return response()->json(['message' => 'Transactional emails are not active'], 400);
+            }
+            $request->validate([Fortify::email() => 'required|email']);
+            $status = Password::broker(config('fortify.passwords'))->sendResetLink(
+                $request->only(Fortify::email())
+            );
+            if ($status == Password::RESET_LINK_SENT) {
+                return app(SuccessfulPasswordResetLinkRequestResponse::class, ['status' => $status]);
+            }
+            if ($status == Password::RESET_THROTTLED) {
+                return response('Already requested a password reset in the past minutes.', 400);
+            }
+            return app(FailedPasswordResetLinkRequestResponse::class, ['status' => $status]);
+        }
+        return response()->json(['message' => 'Transactional emails are not active'], 400);
+    }
     public function link()
     {
         $token = request()->get('token');
@@ -39,7 +84,7 @@ class Controller extends BaseController
                 } else {
                     $team = $user->teams()->first();
                 }
-                if (is_null(data_get($user, 'email_verified_at'))){
+                if (is_null(data_get($user, 'email_verified_at'))) {
                     $user->email_verified_at = now();
                     $user->save();
                 }
@@ -51,98 +96,31 @@ class Controller extends BaseController
         return redirect()->route('login')->with('error', 'Invalid credentials.');
     }
 
-    public function license()
-    {
-        if (!isCloud()) {
-            abort(404);
-        }
-        return view('settings.license', [
-            'settings' => InstanceSettings::get(),
-        ]);
-    }
-
-    public function force_passoword_reset()
-    {
-        return view('auth.force-password-reset');
-    }
-    public function boarding()
-    {
-        if (currentTeam()->boarding || isDev()) {
-            return view('boarding');
-        } else {
-            return redirect()->route('dashboard');
-        }
-    }
-
-    public function settings()
-    {
-        if (isInstanceAdmin()) {
-            $settings = InstanceSettings::get();
-            $database = StandalonePostgresql::whereName('coolify-db')->first();
-            if ($database) {
-                $s3s = S3Storage::whereTeamId(0)->get();
-            }
-            return view('settings.configuration', [
-                'settings' => $settings,
-                'database' => $database,
-                's3s' => $s3s ?? [],
-            ]);
-        } else {
-            return redirect()->route('dashboard');
-        }
-    }
-
-    public function team()
-    {
-        $invitations = [];
-        if (auth()->user()->isAdminFromSession()) {
-            $invitations = TeamInvitation::whereTeamId(currentTeam()->id)->get();
-        }
-        return view('team.index', [
-            'invitations' => $invitations,
-        ]);
-    }
-
-    public function storages()
-    {
-        $s3 = S3Storage::ownedByCurrentTeam()->get();
-        return view('team.storages.all', [
-            's3' => $s3,
-        ]);
-    }
-
-    public function storages_show()
-    {
-        $storage = S3Storage::ownedByCurrentTeam()->whereUuid(request()->storage_uuid)->firstOrFail();
-        return view('team.storages.show', [
-            'storage' => $storage,
-        ]);
-    }
-
-    public function members()
-    {
-        $invitations = [];
-        if (auth()->user()->isAdminFromSession()) {
-            $invitations = TeamInvitation::whereTeamId(currentTeam()->id)->get();
-        }
-        return view('team.members', [
-            'invitations' => $invitations,
-        ]);
-    }
-
-    public function acceptInvitation()
+    public function accept_invitation()
     {
         try {
-            $invitation = TeamInvitation::whereUuid(request()->route('uuid'))->firstOrFail();
+            $resetPassword = request()->query('reset-password');
+            $invitationUuid = request()->route('uuid');
+            $invitation = TeamInvitation::whereUuid($invitationUuid)->firstOrFail();
             $user = User::whereEmail($invitation->email)->firstOrFail();
-            if (auth()->user()->id !== $user->id) {
-                abort(401);
-            }
             $invitationValid = $invitation->isValid();
             if ($invitationValid) {
+                if ($resetPassword) {
+                    $user->update([
+                        'password' => Hash::make($invitationUuid),
+                        'force_password_reset' => true
+                    ]);
+                }
+                if ($user->teams()->where('team_id', $invitation->team->id)->exists()) {
+                    $invitation->delete();
+                    return redirect()->route('team.index');
+                }
                 $user->teams()->attach($invitation->team->id, ['role' => $invitation->role]);
-                refreshSession($invitation->team);
                 $invitation->delete();
+                if (auth()->user()?->id !== $user->id) {
+                    return redirect()->route('login');
+                }
+                refreshSession($invitation->team);
                 return redirect()->route('team.index');
             } else {
                 abort(401);
@@ -153,7 +131,7 @@ class Controller extends BaseController
         }
     }
 
-    public function revokeInvitation()
+    public function revoke_invitation()
     {
         try {
             $invitation = TeamInvitation::whereUuid(request()->route('uuid'))->firstOrFail();

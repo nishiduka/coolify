@@ -13,6 +13,11 @@ const VALID_CRON_STRINGS = [
 const RESTART_MODE = 'unless-stopped';
 
 const DATABASE_DOCKER_IMAGES = [
+    'bitnami/mariadb',
+    'bitnami/mongodb',
+    'bitnami/mysql',
+    'bitnami/postgresql',
+    'bitnami/redis',
     'mysql',
     'mariadb',
     'postgres',
@@ -22,7 +27,8 @@ const DATABASE_DOCKER_IMAGES = [
     'couchdb',
     'neo4j',
     'influxdb',
-    'clickhouse/clickhouse-server'
+    'clickhouse/clickhouse-server',
+    'supabase/postgres'
 ];
 const SPECIFIC_SERVICES = [
     'quay.io/minio/minio',
@@ -34,3 +40,5 @@ const SUPPORTED_OS = [
     'centos fedora rhel ol rocky',
     'sles opensuse-leap opensuse-tumbleweed'
 ];
+
+const SHARED_VARIABLE_TYPES = ['team', 'project', 'environment'];

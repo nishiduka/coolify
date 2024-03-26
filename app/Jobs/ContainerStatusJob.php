@@ -5,8 +5,10 @@ namespace App\Jobs;
 use App\Actions\Database\StartDatabaseProxy;
 use App\Actions\Proxy\CheckProxy;
 use App\Actions\Proxy\StartProxy;
+use App\Actions\Shared\ComplexStatusCheck;
 use App\Models\ApplicationPreview;
 use App\Models\Server;
+use App\Models\ServiceDatabase;
 use App\Notifications\Container\ContainerRestarted;
 use App\Notifications\Container\ContainerStopped;
 use Illuminate\Bus\Queueable;
@@ -22,31 +24,48 @@ class ContainerStatusJob implements ShouldQueue, ShouldBeEncrypted
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
+    public $tries = 4;
+    public function backoff(): int
+    {
+        return isDev() ? 1 : 3;
+    }
+    public function __construct(public Server $server)
+    {
+    }
     public function middleware(): array
     {
-        return [(new WithoutOverlapping($this->server->id))->dontRelease()];
+        return [(new WithoutOverlapping($this->server->uuid))];
     }
 
     public function uniqueId(): int
     {
-        return $this->server->id;
+        return $this->server->uuid;
     }
-
-    public function __construct(public Server $server)
-    {
-    }
-
 
     public function handle()
     {
-        // ray("checking container statuses for {$this->server->id}");
+        if (!$this->server->isFunctional()) {
+            return 'Server is not ready.';
+        };
+
+        $applications = $this->server->applications();
+        $skip_these_applications = collect([]);
+        foreach ($applications as $application) {
+            if ($application->additional_servers->count() > 0) {
+                $skip_these_applications->push($application);
+                ComplexStatusCheck::run($application);
+                $applications = $applications->filter(function ($value, $key) use ($application) {
+                    return $value->id !== $application->id;
+                });
+            }
+        }
+        $applications = $applications->filter(function ($value, $key) use ($skip_these_applications) {
+            return !$skip_these_applications->pluck('id')->contains($value->id);
+        });
         try {
-            if (!$this->server->isServerReady()) {
-                return;
-            };
             if ($this->server->isSwarm()) {
                 $containers = instant_remote_process(["docker service inspect $(docker service ls -q) --format '{{json .}}'"], $this->server, false);
-                $containerReplicase = instant_remote_process(["docker service ls --format '{{json .}}'"], $this->server, false);
+                $containerReplicates = instant_remote_process(["docker service ls --format '{{json .}}'"], $this->server, false);
             } else {
                 // Precheck for containers
                 $containers = instant_remote_process(["docker container ls -q"], $this->server, false);
@@ -54,15 +73,15 @@ class ContainerStatusJob implements ShouldQueue, ShouldBeEncrypted
                     return;
                 }
                 $containers = instant_remote_process(["docker container inspect $(docker container ls -q) --format '{{json .}}'"], $this->server, false);
-                $containerReplicase = null;
+                $containerReplicates = null;
             }
             if (is_null($containers)) {
                 return;
             }
             $containers = format_docker_command_output_to_json($containers);
-            if ($containerReplicase) {
-                $containerReplicase = format_docker_command_output_to_json($containerReplicase);
-                foreach ($containerReplicase as $containerReplica) {
+            if ($containerReplicates) {
+                $containerReplicates = format_docker_command_output_to_json($containerReplicates);
+                foreach ($containerReplicates as $containerReplica) {
                     $name = data_get($containerReplica, 'Name');
                     $containers = $containers->map(function ($container) use ($name, $containerReplica) {
                         if (data_get($container, 'Spec.Name') === $name) {
@@ -81,7 +100,6 @@ class ContainerStatusJob implements ShouldQueue, ShouldBeEncrypted
                     });
                 }
             }
-            $applications = $this->server->applications();
             $databases = $this->server->databases();
             $services = $this->server->services()->get();
             $previews = $this->server->previews();
@@ -132,31 +150,66 @@ class ContainerStatusJob implements ShouldQueue, ShouldBeEncrypted
                     }
                 } else {
                     $uuid = data_get($labels, 'com.docker.compose.service');
+                    $type = data_get($labels, 'coolify.type');
+
                     if ($uuid) {
-                        $database = $databases->where('uuid', $uuid)->first();
-                        if ($database) {
-                            $isPublic = data_get($database, 'is_public');
-                            $foundDatabases[] = $database->id;
-                            $statusFromDb = $database->status;
-                            if ($statusFromDb !== $containerStatus) {
-                                $database->update(['status' => $containerStatus]);
-                            }
-                            if ($isPublic) {
-                                $foundTcpProxy = $containers->filter(function ($value, $key) use ($uuid) {
-                                    if ($this->server->isSwarm()) {
-                                        return data_get($value, 'Spec.Name') === "coolify-proxy_$uuid";
-                                    } else {
-                                        return data_get($value, 'Name') === "/$uuid-proxy";
+                        if ($type === 'service') {
+                            $database_id = data_get($labels, 'coolify.service.subId');
+                            if ($database_id) {
+                                $service_db = ServiceDatabase::where('id', $database_id)->first();
+                                if ($service_db) {
+                                    $uuid = $service_db->service->uuid;
+                                    $isPublic = data_get($service_db, 'is_public');
+                                    if ($isPublic) {
+                                        $foundTcpProxy = $containers->filter(function ($value, $key) use ($uuid) {
+                                            if ($this->server->isSwarm()) {
+                                                return data_get($value, 'Spec.Name') === "coolify-proxy_$uuid";
+                                            } else {
+                                                return data_get($value, 'Name') === "/$uuid-proxy";
+                                            }
+                                        })->first();
+                                        if (!$foundTcpProxy) {
+                                            StartDatabaseProxy::run($service_db);
+                                            $this->server->team?->notify(new ContainerRestarted("TCP Proxy for {$service_db->service->name}", $this->server));
+                                        }
                                     }
-                                })->first();
-                                if (!$foundTcpProxy) {
-                                    StartDatabaseProxy::run($database);
-                                    $this->server->team?->notify(new ContainerRestarted("TCP Proxy for {$database->name}", $this->server));
                                 }
                             }
                         } else {
-                            // Notify user that this container should not be there.
+                            $database = $databases->where('uuid', $uuid)->first();
+                            if ($uuid == 'postgresql') {
+                                ray($database);
+                            }
+                            if ($database) {
+                                $isPublic = data_get($database, 'is_public');
+                                $foundDatabases[] = $database->id;
+                                $statusFromDb = $database->status;
+                                if ($statusFromDb !== $containerStatus) {
+                                    $database->update(['status' => $containerStatus]);
+                                }
+                                ray($database);
+                                if ($isPublic) {
+                                    $foundTcpProxy = $containers->filter(function ($value, $key) use ($uuid) {
+                                        if ($this->server->isSwarm()) {
+                                            return data_get($value, 'Spec.Name') === "coolify-proxy_$uuid";
+                                        } else {
+                                            return data_get($value, 'Name') === "/$uuid-proxy";
+                                        }
+                                    })->first();
+                                    if (!$foundTcpProxy) {
+                                        ray('asdffff');
+                                        StartDatabaseProxy::run($database);
+                                        $this->server->team?->notify(new ContainerRestarted("TCP Proxy for {$database->name}", $this->server));
+                                    }
+                                }
+                            } else {
+                                // Notify user that this container should not be there.
+                            }
                         }
+
+                    }
+                    if (data_get($container, 'Name') === '/coolify-db') {
+                        $foundDatabases[] = 0;
                     }
                 }
                 $serviceLabelId = data_get($labels, 'coolify.serviceId');
@@ -203,12 +256,12 @@ class ContainerStatusJob implements ShouldQueue, ShouldBeEncrypted
             }
             $exitedServices = $exitedServices->unique('id');
             foreach ($exitedServices as $exitedService) {
-                if ($exitedService->status === 'exited') {
+                if (str($exitedService->status)->startsWith('exited')) {
                     continue;
                 }
                 $name = data_get($exitedService, 'name');
                 $fqdn = data_get($exitedService, 'fqdn');
-                $containerName = $name ? "$name ($fqdn)" : $fqdn;
+                $containerName = $name ? "$name, available at $fqdn" : $fqdn;
                 $projectUuid = data_get($service, 'environment.project.uuid');
                 $serviceUuid = data_get($service, 'uuid');
                 $environmentName = data_get($service, 'environment.name');
@@ -225,7 +278,7 @@ class ContainerStatusJob implements ShouldQueue, ShouldBeEncrypted
             $notRunningApplications = $applications->pluck('id')->diff($foundApplications);
             foreach ($notRunningApplications as $applicationId) {
                 $application = $applications->where('id', $applicationId)->first();
-                if ($application->status === 'exited') {
+                if (str($application->status)->startsWith('exited')) {
                     continue;
                 }
                 $application->update(['status' => 'exited']);
@@ -250,7 +303,7 @@ class ContainerStatusJob implements ShouldQueue, ShouldBeEncrypted
             $notRunningApplicationPreviews = $previews->pluck('id')->diff($foundApplicationPreviews);
             foreach ($notRunningApplicationPreviews as $previewId) {
                 $preview = $previews->where('id', $previewId)->first();
-                if ($preview->status === 'exited') {
+                if (str($preview->status)->startsWith('exited')) {
                     continue;
                 }
                 $preview->update(['status' => 'exited']);
@@ -275,7 +328,7 @@ class ContainerStatusJob implements ShouldQueue, ShouldBeEncrypted
             $notRunningDatabases = $databases->pluck('id')->diff($foundDatabases);
             foreach ($notRunningDatabases as $database) {
                 $database = $databases->where('id', $database)->first();
-                if ($database->status === 'exited') {
+                if (str($database->status)->startsWith('exited')) {
                     continue;
                 }
                 $database->update(['status' => 'exited']);
